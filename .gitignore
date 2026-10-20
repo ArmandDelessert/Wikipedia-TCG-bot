@@ -223,3 +223,8 @@ __marimo__/
 .state/
 *.state.b64
 probe-output/
+
+# Données locales d'exploration : cookies de session et pages enregistrées (ne jamais publier)
+Cookies/
+Captures/
+Début de conversation avec Claude Code.md
