@@ -45,7 +45,8 @@ def browser_page(settings: Settings, store: SessionStore | None = None, profile:
     - `store` : les cookies de la session y sont lus au départ et **réécrits à la fin**, ce qui
       conserve les renouvellements faits par le site (même si le run échoue).
     - `profile` : nom d'un profil de navigateur persistant (`<state_dir>/profiles/<nom>`), pour les
-      sites dont la session se renouvelle d'elle-même dans le navigateur.
+      sites dont la session ou les données locales (IndexedDB…) doivent survivre d'un run à l'autre.
+      Avec `store`, le profil n'est complété que des cookies qui lui manquent.
     """
     options = launch_options(settings, headless)
     common = {"locale": locale, "timezone_id": timezone, "viewport": {"width": 1440, "height": 900}}
@@ -59,8 +60,15 @@ def browser_page(settings: Settings, store: SessionStore | None = None, profile:
             browser = pw.chromium.launch(**options)
             context = browser.new_context(**common, storage_state=storage_state)
         try:
-            if store is not None and not profile:
-                _add_cookies(context, store.load())
+            if store is not None:
+                cookies = store.load()
+                if profile:
+                    # Le profil garde déjà ses propres cookies, éventuellement plus récents que
+                    # l'état sauvegardé : on ne lui ajoute que ceux qu'il n'a pas.
+                    present = {(c["name"], c["domain"].lstrip("."), c["path"]) for c in context.cookies()}
+                    cookies = [c for c in cookies
+                               if (c["name"], c["domain"].lstrip("."), c["path"]) not in present]
+                _add_cookies(context, cookies)
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
             yield page
