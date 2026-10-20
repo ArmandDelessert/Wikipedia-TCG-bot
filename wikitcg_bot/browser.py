@@ -38,7 +38,7 @@ def _add_cookies(context: BrowserContext, cookies: list[dict]) -> None:
 
 @contextlib.contextmanager
 def browser_page(settings: Settings, store: SessionStore | None = None, profile: str | None = None,
-                 storage_state: dict | None = None, locale: str = "fr-FR",
+                 locale: str = "fr-FR",
                  timezone: str = "Europe/Paris", headless: bool | None = None) -> Iterator[Page]:
     """Ouvre le navigateur et rend une page ; tout est refermé à la sortie.
 
@@ -58,12 +58,10 @@ def browser_page(settings: Settings, store: SessionStore | None = None, profile:
             browser = None
         else:
             browser = pw.chromium.launch(**options)
-            context = browser.new_context(**common, storage_state=storage_state)
+            context = browser.new_context(**common)
         try:
             if store is not None:
-                # cf_clearance appartient à l'IP et au navigateur qui ont passé le défi Cloudflare :
-                # le réinjecter dans un autre navigateur ne sert à rien et présenterait un jeton incohérent.
-                cookies = [c for c in store.load() if c["name"] != "cf_clearance"]
+                cookies = store.load()
                 if profile:
                     # Le profil garde déjà ses propres cookies, éventuellement plus récents que
                     # l'état sauvegardé : on ne lui ajoute que ceux qu'il n'a pas.

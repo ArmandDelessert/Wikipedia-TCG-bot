@@ -13,4 +13,4 @@ def test_summary_sorts_by_rarity_and_flags_failures():
 
 
 def test_summary_without_sites():
-    assert "Aucun site configuré" in render_summary([])
+    assert "Aucun site à traiter" in render_summary([])

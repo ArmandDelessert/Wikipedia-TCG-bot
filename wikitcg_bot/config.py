@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,13 +76,3 @@ class Settings:
 
     def get(self, key: str) -> str:
         return (self.env.get(key) or "").strip()
-
-    def storage_state(self, key: str) -> dict | None:
-        """Décode un état de session Playwright stocké en base64 dans une variable."""
-        raw = self.get(key)
-        if not raw:
-            return None
-        try:
-            return json.loads(base64.b64decode(raw))
-        except ValueError as exc:
-            raise ValueError(f"{key} n'est pas un JSON encodé en base64 valide") from exc

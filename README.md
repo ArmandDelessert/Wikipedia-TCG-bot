@@ -60,10 +60,10 @@ python -m venv .venv
 | `login <site>` | connexion manuelle dans Chrome ; la session est conservée |
 
 Codes de sortie : 0 tout va bien, 1 erreur, 2 session expirée ou refusée (reconnectez-vous ou refaites
-l'export), 3 un autre run est en cours.
+l'export), 3 un autre run est en cours, 64 arguments invalides.
 
 Réglages facultatifs : copiez `.env.example` en `.env` (nombre maximal de packs par run, navigateur,
-fenêtre visible avec `HEADLESS=0`…).
+fenêtre visible avec `HEADLESS=0`, série de wikitcg.net, pack mystère…).
 
 ## Où vont les données
 
@@ -88,7 +88,12 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
 
 - Le bot repart de l'export, puis **réécrit les cookies renouvelés** dans `.state/sessions/` à chaque
   run : ce qu'un site renouvelle est donc conservé sans rien faire. Un export plus récent que cet état
-  le remplace.
+  le remplace. Exception : `wikigacha` travaille dans un profil Chrome persistant, qui ne reçoit que les
+  cookies qui lui manquent ; si sa session est révoquée, supprimez `.state/profiles/wikigacha` avant de
+  refaire l'export. Le cookie `cf_clearance` de Cloudflare n'est jamais conservé (lié à l'IP et au
+  navigateur d'origine).
+- Le journal `.state/logs/bot.log` reçoit une ligne par site et par run (y compris les arrêts propres).
+  La tâche planifiée tourne sans fenêtre : c'est là qu'il faut regarder en cas de doute.
 - `wikitcg.net` : 14 jours, aucun renouvellement observé. `status` prévient quand il reste moins de
   3 jours : refaites alors un export.
 - **WikiMasters** utilise Supabase, dont le jeton de rafraîchissement ne sert qu'une fois. Réutiliser un
@@ -97,9 +102,11 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
 
 ## Limites connues
 
-- Wikipedia Gacha et WikiMasters créditent ou proposent des récompenses (missions, « récompense de
-  connexion » de wiki-tcg.com, packs de complétion de wikitcg.net) : le bot ne les réclame pas, faute
-  d'autorisation explicite. Elles vous attendent à votre prochaine visite.
+- Le bot ne réclame aucune récompense, faute d'autorisation explicite : « récompense de connexion » de
+  wiki-tcg.com, packs de complétion de wikitcg.net, missions de Wikipedia Gacha (celles-ci créditent
+  pourtant +2 packs d'elles-mêmes pendant l'ouverture). Les autres vous attendent à votre prochaine visite.
+- Le pack mystère de wikitcg.net est demandé « à l'aveugle » (cadence inconnue, ~6 h supposées) ; les refus
+  sont sans effet. `WIKITCG_NET_MYSTERY=0` désactive la demande.
 - Les packs spéciaux de WikiMasters et de wiki-tcg.com ne sont pas vérifiés en réel.
 - Se déconnecter d'un site dans le navigateur d'où vient l'export peut invalider la session exportée
   (non vérifié) : évitez-le, ou refaites un export ensuite.

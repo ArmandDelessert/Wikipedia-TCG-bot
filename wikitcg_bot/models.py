@@ -8,7 +8,7 @@ class SiteError(Exception):
 
 
 class AuthError(SiteError):
-    """Session/identifiants refusés : l'utilisateur doit renouveler son secret."""
+    """Session refusée ou expirée : il faut se reconnecter (« login ») ou refaire un export de cookies."""
 
 
 @dataclass(frozen=True)

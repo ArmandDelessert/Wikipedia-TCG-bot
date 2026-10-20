@@ -4,7 +4,8 @@
     python -m wikitcg_bot status           lit l'état de chaque site sans rien ouvrir
     python -m wikitcg_bot login SITE       connexion manuelle dans Chrome (session conservée)
 
-Codes de sortie : 0 tout va bien, 1 erreur, 2 session expirée ou refusée, 3 run déjà en cours.
+Codes de sortie : 0 tout va bien, 1 erreur, 2 session expirée ou refusée, 3 run déjà en cours,
+64 arguments invalides.
 """
 from __future__ import annotations
 
@@ -28,19 +29,40 @@ from .sites import SITES
 
 log = logging.getLogger("wikitcg_bot")
 
-EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_BUSY = 0, 1, 2, 3
+EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_BUSY, EXIT_USAGE = 0, 1, 2, 3, 64
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        # Le code 2 d'argparse signifierait « session expirée » pour la tâche planifiée.
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: erreur : {message}\n")
+
+
+def one_line(text: object, limit: int = 160) -> str:
+    """Un message d'erreur tient sur une ligne (Playwright ajoute un « Call log » de plusieurs lignes)."""
+    first = (str(text).strip().splitlines() or [""])[0].strip()
+    return first if len(first) <= limit else first[: limit - 1] + "…"
 
 
 def run_site(name: str, settings: Settings) -> SiteResult:
     site = SITES[name]
     try:
-        return site.run(settings)
+        result = site.run(settings)
     except Exception as exc:  # un site en échec ne doit pas bloquer les autres
         auth = isinstance(exc, AuthError)
-        log.error("%s : %s : %s", site.label, "authentification" if auth else "erreur", exc)
         log.debug("détail de l'échec", exc_info=True)
         kind = "Session refusée" if auth else "Erreur"
-        return SiteResult(name, site.label, ok=False, auth_failed=auth, message=f"{kind} : {exc}")
+        result = SiteResult(name, site.label, ok=False, auth_failed=auth,
+                            message=f"{kind} : {one_line(exc)}")
+    # La tâche planifiée tourne sans console : une ligne par site dans le journal, y compris pour un
+    # arrêt « propre » (vérification demandée, défi, limite atteinte) qui ne lève aucune exception.
+    stock = "?" if result.packs_before is None else result.packs_before
+    log.log(logging.INFO if result.ok else logging.WARNING,
+            "%s : %s, %d pack(s) ouvert(s) (stock avant : %s)%s",
+            site.label, "ok" if result.ok else "ÉCHEC", result.opened, stock,
+            f" — {one_line(result.message)}" if result.message else "")
+    return result
 
 
 def setup_logging(settings: Settings) -> None:
@@ -61,8 +83,8 @@ def setup_logging(settings: Settings) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="wikitcg_bot", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = Parser(prog="wikitcg_bot", description=__doc__,
+                    formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="ouvre les packs disponibles (par défaut)")
     run.add_argument("--sites", default="",
@@ -125,7 +147,10 @@ def do_run(parser: argparse.ArgumentParser, args, settings: Settings) -> int:
 def do_status(parser: argparse.ArgumentParser, args, settings: Settings) -> int:
     names = _site_names(parser, args.sites, settings)
     for name, site in SITES.items():
-        state = site.session_summary(settings) if site.configured(settings) else "aucune session"
+        if site.configured(settings):
+            state = site.session_summary(settings)
+        else:
+            state = f"aucune session (lancez « login {name} » ou placez un export dans {settings.cookies_dir}/)"
         print(f"- {site.label} : {state}")
     print()
     settings.dry_run = True

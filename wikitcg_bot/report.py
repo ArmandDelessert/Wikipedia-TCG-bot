@@ -19,7 +19,7 @@ def rarity_counts(result: SiteResult) -> str:
 
 def render_summary(results: list[SiteResult]) -> str:
     if not results:
-        return "## Ouverture de packs\n\nAucun site configuré : ajoutez les secrets décrits dans le README.\n"
+        return "## Ouverture de packs\n\nAucun site à traiter pour l'instant (session absente, ou prochain passage pas encore venu).\n"
     lines = [
         "## Ouverture de packs",
         "",
@@ -37,9 +37,8 @@ def render_summary(results: list[SiteResult]) -> str:
     for r in results:
         if not r.cards:
             continue
-        lines += ["", f"<details><summary>Cartes tirées — {r.label}</summary>", ""]
+        lines += ["", f"Cartes tirées — {r.label}", ""]
         for card in sorted(r.cards, key=lambda c: _rank(c.rarity)):
             lines.append(f"- **{card.rarity}** {card.title}")
-        lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
 

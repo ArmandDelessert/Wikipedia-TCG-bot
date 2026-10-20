@@ -18,6 +18,14 @@ from .cookies import Cookie, for_hosts, is_expired, read_netscape
 
 log = logging.getLogger(__name__)
 
+# cf_clearance appartient à l'IP et au navigateur qui ont passé un défi Cloudflare : le conserver ou le
+# rejouer ailleurs ne sert à rien (et Cloudflare en réémet un au navigateur du bot quand il le juge utile).
+IGNORED_COOKIES = frozenset({"cf_clearance"})
+
+
+def _usable(cookies: list[Cookie]) -> list[Cookie]:
+    return [c for c in cookies if c["name"] not in IGNORED_COOKIES and not is_expired(c)]
+
 
 class SessionStore:
     def __init__(self, settings: Settings, site: str, hosts: tuple[str, ...],
@@ -50,18 +58,18 @@ class SessionStore:
         export = self.export_path()
         state = self.state_path
         if export and (not state.is_file() or export.stat().st_mtime > state.stat().st_mtime):
-            cookies = for_hosts(read_netscape(export), self.hosts)
+            cookies = _usable(for_hosts(read_netscape(export), self.hosts))
             log.info("Session %s : cookies importés depuis %s.", self.site, export.name)
             self.save(cookies)
-            return [c for c in cookies if not is_expired(c)]
+            return cookies
         if state.is_file():
             data = json.loads(state.read_text(encoding="utf-8"))
-            return [c for c in data.get("cookies", []) if not is_expired(c)]
+            return _usable(data.get("cookies", []))
         return []
 
     def save(self, cookies: list[Cookie]) -> None:
-        """Écrit l'état (de façon atomique) ; ne garde que les cookies de ce site, non expirés."""
-        keep = [c for c in for_hosts(cookies, self.hosts) if not is_expired(c)]
+        """Écrit l'état (de façon atomique) ; ne garde que les cookies de ce site, non expirés (hors cf_clearance)."""
+        keep = _usable(for_hosts(cookies, self.hosts))
         path = self.state_path
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")

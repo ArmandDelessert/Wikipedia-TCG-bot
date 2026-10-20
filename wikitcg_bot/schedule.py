@@ -21,6 +21,9 @@ DEFAULT_MAX = {"wikigacha": 10, "wikimasters": 10, "wiki_tcg_com": 10, "wikitcg_
 SAFETY = 0.8  # on repasse un peu avant que le stock soit plein
 MIN_WAIT = 60.0
 MAX_WAIT = 12 * 3600.0
+# wikitcg.net : une simple requête HTTP, et un pack mystère à la cadence encore inconnue (~6 h ?) qu'un
+# stock vidé ne reflète pas : on ne s'éloigne pas de plus de 3 h.
+MAX_WAIT_BY_SITE = {"wikitcg_net": 3 * 3600.0}
 RETRY_AFTER_FAILURE = 30 * 60.0  # session expirée ou erreur : inutile d'insister chaque 10 minutes
 
 
@@ -54,7 +57,7 @@ def due_in(result: SiteResult) -> float | None:
         return None
     stock_after = max(0, result.packs_before - result.opened)
     wait = max(0, maximum - stock_after) * period * SAFETY
-    return min(MAX_WAIT, max(MIN_WAIT, wait))
+    return min(MAX_WAIT_BY_SITE.get(result.site, MAX_WAIT), MAX_WAIT, max(MIN_WAIT, wait))
 
 
 def is_due(settings: Settings, site: str, now: float | None = None) -> bool:

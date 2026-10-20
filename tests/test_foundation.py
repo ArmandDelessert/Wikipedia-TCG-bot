@@ -73,7 +73,7 @@ def test_store_imports_export_then_keeps_renewed_state(settings):
     export = _write_export(settings)
     assert store.configured()
     names = {c["name"] for c in store.load()}
-    assert names == {"wtcg_session", "cf_clearance", "sessiononly", "hidden"}  # ni périmé ni étranger
+    assert names == {"wtcg_session", "sessiononly", "hidden"}  # ni périmé, ni étranger, ni cf_clearance (lié à l'IP)
 
     renewed = store.load()
     for c in renewed:
@@ -89,11 +89,11 @@ def test_store_imports_export_then_keeps_renewed_state(settings):
     assert store.value("wtcg_session") == "abc.def.ghi"
 
 
-def test_store_save_drops_expired_and_foreign_cookies(settings):
+def test_store_save_drops_expired_foreign_and_cloudflare_cookies(settings):
     store = SessionStore(settings, "wikitcg_net", ("wikitcg.net",))
     store.save(ck.parse_netscape(EXPORT))
     data = json.loads(store.state_path.read_text(encoding="utf-8"))
-    assert {c["name"] for c in data["cookies"]} == {"wtcg_session", "cf_clearance", "sessiononly", "hidden"}
+    assert {c["name"] for c in data["cookies"]} == {"wtcg_session", "sessiononly", "hidden"}
 
 
 def test_describe_never_shows_values(settings):

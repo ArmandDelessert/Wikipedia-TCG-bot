@@ -24,10 +24,12 @@ def test_slow_site_waits_longer():
     assert schedule.due_in(result("wiki_tcg_com", 10, opened=10)) == pytest.approx(7200)
 
 
-def test_wikitcg_net_waits_hours_but_never_more_than_the_cap(monkeypatch):
-    assert schedule.due_in(result("wikitcg_net", 5, opened=5)) == pytest.approx(38400)  # ~10,7 h
-    monkeypatch.setattr(schedule, "MAX_WAIT", 3600.0)
-    assert schedule.due_in(result("wikitcg_net", 5, opened=5)) == 3600.0
+def test_wikitcg_net_never_waits_more_than_three_hours(monkeypatch):
+    # 5 × 9600 s × 0,8 = 10,7 h, ramené à 3 h (pack mystère à la cadence inconnue)
+    assert schedule.due_in(result("wikitcg_net", 5, opened=5)) == 3 * 3600
+    assert schedule.due_in(result("wikitcg_net", 4, opened=0)) == pytest.approx(9600 * 0.8)
+    monkeypatch.setattr(schedule, "MAX_WAIT", 600.0)  # le plafond général l'emporte s'il est plus bas
+    assert schedule.due_in(result("wikitcg_net", 5, opened=5)) == 600.0
 
 
 def test_run_stopped_by_the_cap_comes_back_quickly():

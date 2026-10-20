@@ -141,7 +141,8 @@ exporter.
    fréquence de `human_verification_required`, renouvellement du jeton Supabase dans un Chrome headless à
    profil persistant (lancer `status --sites wikimasters` deux fois à plus d'une heure d'écart).
 3. Packs spéciaux : WikiMasters (`/api/packs/special`) et wiki-tcg.com (`player.speciaux`, forme supposée).
-4. Wikipedia Gacha : raretés SR et LR, packs gold et black, défi Cloudflare jamais rencontré (la branche qui
-   le traite n'est testée que contre un faux site).
+4. Wikipedia Gacha : raretés SR et LR, packs gold et black. Aucun défi Cloudflare visible n'a été servi au
+   Chrome headless (la branche qui le traite n'est testée que contre un faux site), mais Cloudflare lui a
+   délivré silencieusement son propre `cf_clearance` : le contrôle passif a donc eu lieu.
 5. Récompenses non réclamées : « récompense de connexion » (wiki-tcg.com, 3 boosters au jour 2 sur 7),
    packs de complétion (wikitcg.net), missions (Wikipedia Gacha).
