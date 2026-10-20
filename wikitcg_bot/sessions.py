@@ -20,16 +20,22 @@ log = logging.getLogger(__name__)
 
 
 class SessionStore:
-    def __init__(self, settings: Settings, site: str, hosts: tuple[str, ...]):
+    def __init__(self, settings: Settings, site: str, hosts: tuple[str, ...],
+                 import_export: bool = True):
         self.settings = settings
         self.site = site
         self.hosts = tuple(hosts)
+        # Faux pour un site dont le jeton de session tourne à chaque usage (Supabase) : réutiliser
+        # une copie exportée invaliderait la session du navigateur d'où elle vient.
+        self.import_export = import_export
 
     @property
     def state_path(self) -> Path:
         return self.settings.sessions_dir / f"{self.site}.json"
 
     def export_path(self) -> Path | None:
+        if not self.import_export:
+            return None
         for host in self.hosts:
             path = self.settings.cookies_dir / f"{host}_cookies.txt"
             if path.is_file():

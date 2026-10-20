@@ -14,6 +14,8 @@ class Site(Protocol):
     label: str
     hosts: tuple[str, ...]  # hôtes dont les cookies font la session (cf. `SessionStore`)
     login_url: str  # page où se connecter à la main (`python -m wikitcg_bot login <site>`)
+    # Optionnel (vrai par défaut) : `import_export = False` interdit d'importer l'export de cookies de
+    # `Cookies/` pour ce site (session à jeton tournant, cf. `SessionStore`).
 
     def configured(self, settings: Settings) -> bool: ...
 
@@ -23,7 +25,8 @@ class Site(Protocol):
 
 
 def session_store(settings: Settings, site: Site) -> SessionStore:
-    return SessionStore(settings, site.name, site.hosts)
+    return SessionStore(settings, site.name, site.hosts,
+                        import_export=getattr(site, "import_export", True))
 
 
 def pause(settings: Settings) -> None:
