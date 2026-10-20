@@ -143,7 +143,7 @@ const openDb = () => new Promise((res, rej) => {
 const write = (db, store, fn) => new Promise((res, rej) => {
   const t = db.transaction([store], 'readwrite'); fn(t.objectStore(store)); t.oncomplete = res; t.onerror = () => rej(t.error);
 });
-let db, stock = 0, results = false;
+let db, stock = 0, results = false, flags = {};
 
 $('fx').onclick = () => { $('fx').setAttribute('aria-pressed', 'false'); post('/__clicked', {name: 'effects-toggle'}); };
 
@@ -169,8 +169,13 @@ async function open() {
     await write(db, 'sync_queue', s => s.delete(entry.id));
   }, 1200);
   results = true;
-  $('app').innerHTML = '<ul>' + data.cards.map(c => '<li>' + c.title + '</li>').join('') + '</ul><button id="back">RETOUR AUX PACKS</button>';
-  $('back').onclick = () => { results = false; render(); };
+  $('app').innerHTML = '<ul>' + data.cards.map(c => '<li>' + c.title + '</li>').join('') + '</ul><button id="back">' + (flags.backlabel || 'RETOUR AUX PACKS') + '</button>';
+  $('back').onclick = () => { results = false; $('app').innerHTML = ''; setTimeout(render, flags.slowrender || 0); };
+  if (flags.overlay) {  // une fenêtre tardive recouvre tout l'écran, bouton compris
+    const cover = document.createElement('div');
+    cover.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.5)';
+    document.body.appendChild(cover);
+  }
 }
 
 function modal(html, then) { $('modals').innerHTML = html; then(); }
@@ -190,10 +195,14 @@ function showConsent() {
   modal('<div role="dialog"><h3>Wikipedia Gacha demande votre consentement</h3><button id="allow">Autoriser</button><button id="manage">Gérer les options</button></div>', () => {
     $('allow').onclick = () => post('/__clicked', {name: 'consent-allow'});
     $('manage').onclick = () => {
+      const names = flags.oddconsent  // balisage inconnu : les cases cochées ne se reconnaissent plus
+        ? ['Option A', 'Option B', 'Option C']
+        : ['Consentement (72 fournisseurs), Mesurer la performance', 'Intérêt légitime (32 fournisseurs), Mesurer la performance',
+           'Intérêt légitime (4 fournisseurs), Développer les services'];
       modal('<div role="dialog"><h3>Gérer vos données</h3>'
-        + '<input type="checkbox" aria-label="Consentement (72 fournisseurs), Mesurer la performance">'
-        + '<input type="checkbox" checked aria-label="Intérêt légitime (32 fournisseurs), Mesurer la performance">'
-        + '<input type="checkbox" checked aria-label="Intérêt légitime (4 fournisseurs), Développer les services">'
+        + '<input type="checkbox" aria-label="' + names[0] + '">'
+        + '<input type="checkbox" checked aria-label="' + names[1] + '">'
+        + '<input type="checkbox" checked aria-label="' + names[2] + '">'
         + '<button id="all">Tout accepter</button><button id="confirm">Confirmer les choix</button></div>', () => {
         $('all').onclick = () => post('/__clicked', {name: 'consent-all'});
         $('confirm').onclick = () => {
@@ -207,7 +216,7 @@ function showConsent() {
 
 (async () => {
   db = await openDb();
-  const flags = await (await fetch('/__flags')).json();
+  flags = await (await fetch('/__flags')).json();
   const prog = await (await fetch('/api/user/progress?lang=FR&includeCards=1')).json();
   stock = prog.state.meta.packState.balance;
   if (!flags.noimport) await write(db, 'cards_fr', s => prog.state.cards.forEach(c => s.put(c)));
@@ -225,8 +234,17 @@ class FakeState:
         self.noimport = False
         self.drop = False
         self.challenge = False
+        self.session_status = 200  # autre que 200 : panne du serveur d'authentification
+        self.session_delay = 0.0  # secondes avant de répondre à /api/auth/session
+        self.api_challenge = False  # défi Cloudflare sur le résumé du cloud (l'import du client, lui, passe)
+        self.fail_summary = False  # le résumé du cloud répond 502 une fois un pack ouvert
+        self.oddconsent = False
+        self.backlabel = None
+        self.overlay = False
+        self.slowrender = 0
         self.gacha_calls = 0
         self.full_reads = 0
+        self.light_reads = 0
         self.decoys: list[str] = []
         self.consent = None
         self.next_id = 100
@@ -266,12 +284,22 @@ class FakeGachaHandler(BaseHTTPRequestHandler):
             else:
                 self._send(200, PAGE, "text/html; charset=utf-8")
         elif url.path == "/api/auth/session":
+            time.sleep(fake.session_delay)
+            if fake.session_status != 200:
+                return self._send(fake.session_status, {"error": "busy"})
             self._send(200, {"user": {"name": "joueur"}, "expires": "2099-01-01"} if fake.signed_in else {})
         elif url.path == "/__flags":
-            self._send(200, {"noimport": fake.noimport})
+            self._send(200, {"noimport": fake.noimport, "oddconsent": fake.oddconsent, "backlabel": fake.backlabel,
+                             "overlay": fake.overlay, "slowrender": fake.slowrender})
         elif url.path == "/api/user/progress":
             full = parse_qs(url.query).get("includeCards") == ["1"]
             fake.full_reads += full
+            fake.light_reads += not full
+            if not full and fake.api_challenge:
+                return self._send(403, "<html><head><title>Un instant…</title></head></html>", "text/html",
+                                  [("cf-mitigated", "challenge")])
+            if not full and fake.fail_summary and fake.gacha_calls:
+                return self._send(502, {"error": "bad gateway"})
             cards = [{"id": i, "title": f"Carte {i}", "rarity_rank": "C", "count": n} for i, n in fake.cloud.items()]
             self._send(200, {"exists": True, "cardsIncluded": full, "cardSummary": fake.summary(),
                              "state": {"cards": cards if full else [],
@@ -316,7 +344,8 @@ def fake_site(monkeypatch):
     monkeypatch.setattr(w, "BASE_URL", f"http://127.0.0.1:{server.server_port}")
     # Les attentes réelles (minutes) sont raccourcies pour garder les tests rapides.
     for name, value in {"GATE_WAIT_S": 1.5, "GATE_POLL_MS": 300, "SYNC_WAIT_S": 12, "SYNC_POLL_MS": 400,
-                        "OVERLAY_PATIENCE_S": 0.8, "SETTLE_MS": 200}.items():
+                        "OVERLAY_PATIENCE_S": 0.8, "SETTLE_MS": 200, "CLOUD_READ_GAP_S": 0,
+                        "FETCH_TIMEOUT_MS": 5000, "BACK_CLICK_TIMEOUT_MS": 1500}.items():
         monkeypatch.setattr(w, name, value)
     yield server.fake
     server.shutdown()
@@ -401,3 +430,84 @@ def test_cloudflare_challenge_is_reported_not_bypassed(fake_site, make_settings)
     with pytest.raises(SiteError, match=re.compile("défi Cloudflare.*cf-mitigated: challenge")):
         WikiGacha().run(make_settings())
     assert fake_site.gacha_calls == 0
+
+
+@requires_browser
+def test_a_failure_after_an_opening_keeps_what_was_drawn(fake_site, make_settings):
+    fake_site.fail_summary = True  # le résumé du cloud répond 502 dès qu'un pack a été ouvert
+    settings = make_settings()
+    settings.max_packs = 2
+    result = WikiGacha().run(settings)
+    assert fake_site.gacha_calls == 1
+    assert not result.ok and result.opened == 1 and len(result.cards) == 5  # consigné malgré l'échec
+    assert "synchronisation non vérifiée" in result.message and "502" in result.message
+    assert not result.auth_failed
+
+
+@requires_browser
+def test_a_pack_consumed_before_the_results_screen_breaks_is_still_recorded(fake_site, make_settings, monkeypatch):
+    fake_site.backlabel = "Continuer"  # le bouton de retour change de libellé : l'écran des résultats n'est « jamais » reconnu
+    monkeypatch.setattr(w, "RESULTS_WAIT_S", 2)
+    result = WikiGacha().run(make_settings())
+    assert fake_site.gacha_calls == 1  # on s'arrête : l'état de l'écran est inconnu
+    assert not result.ok and result.opened == 1 and len(result.cards) == 5
+    assert "écran des résultats" in result.message and "ATTENTION" in result.message
+
+
+@requires_browser
+def test_an_overlay_over_the_back_button_is_a_short_recorded_failure(fake_site, make_settings):
+    fake_site.overlay = True  # Playwright finit par un délai dépassé, pas par une erreur du site
+    result = WikiGacha().run(make_settings())
+    assert fake_site.gacha_calls == 1
+    assert not result.ok and result.opened == 1 and len(result.cards) == 5
+    assert "Timeout" in result.message and "Call log" not in result.message  # une ligne, pas la trace de Playwright
+
+
+@requires_browser
+def test_an_unreadable_stock_is_not_an_empty_stock(fake_site, make_settings):
+    fake_site.slowrender = 1500  # l'écran des packs met du temps à revenir après « RETOUR AUX PACKS »
+    result = WikiGacha().run(make_settings())
+    assert result.opened == 3 and fake_site.gacha_calls == 3 and "Tous les packs disponibles" in result.message
+
+
+@requires_browser
+def test_an_unavailable_session_service_is_not_an_expired_session(fake_site, make_settings):
+    fake_site.session_status = 503
+    with pytest.raises(SiteError, match="503") as caught:
+        WikiGacha().run(make_settings())
+    assert caught.type is SiteError  # pas d'AuthError : le propriétaire n'a aucune raison de se reconnecter
+    assert fake_site.gacha_calls == 0
+
+
+@requires_browser
+def test_a_challenge_on_an_api_route_is_reported_as_such(fake_site, make_settings):
+    fake_site.api_challenge = True
+    with pytest.raises(SiteError, match=re.compile("défi Cloudflare servi sur /api/user/progress.*login wikigacha")) as caught:
+        WikiGacha().run(make_settings())
+    assert caught.type is SiteError and "HEADLESS" not in str(caught.value)
+    assert fake_site.gacha_calls == 0
+
+
+@requires_browser
+def test_a_server_that_never_answers_does_not_freeze_the_run(fake_site, make_settings, monkeypatch):
+    fake_site.session_delay = 6
+    monkeypatch.setattr(w, "FETCH_TIMEOUT_MS", 800)
+    with pytest.raises(SiteError, match="sans réponse") as caught:
+        WikiGacha().run(make_settings())
+    assert caught.type is SiteError
+
+
+@requires_browser
+def test_a_consent_that_cannot_be_refused_is_never_confirmed(fake_site, make_settings):
+    fake_site.oddconsent = True  # cases cochées que le bot ne sait pas reconnaître
+    with pytest.raises(SiteError, match="Bandeau de consentement.*restent cochées"):
+        WikiGacha().run(make_settings())
+    assert fake_site.consent is None and fake_site.gacha_calls == 0  # « Confirmer les choix » n'a pas été cliqué
+
+
+@requires_browser
+def test_the_cloud_summary_is_not_polled_between_openings(fake_site, make_settings, monkeypatch):
+    monkeypatch.setattr(w, "CLOUD_READ_GAP_S", 1000)
+    result = WikiGacha().run(make_settings())
+    assert result.ok and result.opened == 3
+    assert fake_site.light_reads == 2  # une lecture au départ, une autre une fois la file de synchronisation vidée

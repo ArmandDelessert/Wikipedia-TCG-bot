@@ -11,7 +11,9 @@ Avant toute ouverture, le module :
   2. sauvegarde la collection du cloud (une fois par jour au plus) dans `<state_dir>/backups/` ;
   3. exige que la collection locale du navigateur soit identique à celle du cloud, sans changement
      en attente : un navigateur qui part d'une collection vide ou partielle n'ouvre rien.
-Après chaque pack et à la fin, il relit le résumé du cloud : toute baisse arrête tout.
+Pendant les ouvertures (au plus une relecture par minute, pas de martèlement) et à la fin, il relit le
+résumé du cloud : toute baisse arrête tout. Un échec après l'ouverture d'un pack ne fait jamais disparaître
+ce qui a été tiré : le résultat partiel est rendu avec une alarme.
 
 On ne touche à rien d'autre : ni synchronisation manuelle, ni publicité, ni partage, ni missions,
 ni déconnexion. La publicité de recharge (« Regarder une pub pour recharger ») n'est jamais cliquée.
@@ -48,12 +50,19 @@ REFILL_MS = 60_000
 
 BACKUP_EVERY_S = 20 * 3600  # une sauvegarde par jour au plus (marge pour un planning horaire)
 BACKUPS_KEPT = 14
-SYNC_WAIT_S = 90  # attente de la synchronisation après les ouvertures (relevé du cloud toutes les SYNC_POLL_MS)
-SYNC_POLL_MS = 10_000
+SYNC_WAIT_S = 90  # attente de la synchronisation après les ouvertures
+SYNC_POLL_MS = 5000  # relevé de la base locale (gratuit : aucune requête réseau)
 GATE_WAIT_S = 75  # attente de la convergence local/cloud avant d'ouvrir
 GATE_POLL_MS = 5000
+# Le résumé du cloud n'est relu qu'à ce rythme au plus (« pas de martèlement ») ; seule la base locale du
+# navigateur est interrogée plus souvent. Les relevés obligatoires (début, fin) ne sont pas concernés.
+CLOUD_READ_GAP_S = 60
 OVERLAY_PATIENCE_S = 4.0  # le bandeau de consentement et les annonces arrivent en différé
 SETTLE_MS = 1500  # laisse l'interface adopter l'état importé du cloud avant de lire le stock
+FETCH_TIMEOUT_MS = 20_000  # un serveur qui ne répond pas ne doit pas figer le run jusqu'au délai du planificateur
+LOCAL_TIMEOUT_MS = 15_000
+RESULTS_WAIT_S = 60  # temps laissé à l'écran des résultats pour apparaître après le toucher du pack
+BACK_CLICK_TIMEOUT_MS = 15_000
 
 # Libellés français et anglais (la langue de l'interface suit ?lang=).
 STOCK = re.compile(r"(?:PAQUETS QUOTIDIENS|DAILY PACKS)\s*:?\s*(\d+)\s*/\s*(\d+)", re.I)
@@ -67,46 +76,67 @@ INFO_OK = re.compile(r"^(ok|compris|got it)$", re.I)
 CONSENT_MANAGE = re.compile(r"^(gérer les options|manage options)$", re.I)
 CONSENT_CONFIRM = re.compile(r"^(confirmer les choix|confirm choices)$", re.I)
 LEGITIMATE_INTEREST = re.compile(r"^(intérêt légitime|legitimate interest)", re.I)
+# Case native ou interrupteur ARIA ; une case grisée (obligatoire) n'est pas un choix à refuser.
+TOGGLE_IS_ON = "e => e.checked ?? e.ariaChecked === 'true'"
+TOGGLE_IS_ON_AND_ENABLED = "e => !e.disabled && e.ariaDisabled !== 'true' && (e.checked ?? e.ariaChecked === 'true')"
 
+# `page.evaluate` n'a pas de délai propre (le délai par défaut de Playwright ne couvre que les actions) :
+# la requête est donc interrompue côté page. `cf-mitigated` permet de reconnaître un défi Cloudflare servi
+# sur une route d'API, que le corps (HTML) ne ferait pas voir.
 _FETCH_JS = """
-async (path) => {
-  const r = await fetch(path, { credentials: 'same-origin', cache: 'no-store' });
-  let body = null;
-  try { body = await r.json(); } catch (e) {}
-  return { status: r.status, body };
+async ([path, timeoutMs]) => {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: ctl.signal });
+    let body = null;
+    try { body = await r.json(); } catch (e) {}
+    return { status: r.status, body, mitigated: r.headers.get('cf-mitigated') };
+  } catch (e) {
+    return { status: 0, body: null, mitigated: null, error: (e && e.name) || 'Error' };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 """
 
 # Lecture seule de la base locale du jeu : exemplaires de la langue + changements en attente de sync.
 _LOCAL_JS = """
-async (lang) => {
-  const out = { present: false, cards: 0, copies: 0, pending: 0 };
-  const dbs = await indexedDB.databases();
-  if (!dbs.some(d => d.name === 'wiki-gacha-db')) return out;
-  const db = await new Promise((resolve, reject) => {
-    const req = indexedDB.open('wiki-gacha-db');
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-  try {
-    out.present = true;
-    const store = 'cards_' + lang.toLowerCase();
-    const names = Array.from(db.objectStoreNames);
-    if (!names.includes(store)) return out;
-    const tx = db.transaction([store, 'sync_queue'], 'readonly');
-    const all = (s) => new Promise((resolve, reject) => {
-      const req = tx.objectStore(s).getAll();
+async ([lang, timeoutMs]) => {
+  const read = async () => {
+    const out = { present: false, cards: 0, copies: 0, pending: 0 };
+    const dbs = await indexedDB.databases();
+    if (!dbs.some(d => d.name === 'wiki-gacha-db')) return out;
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('wiki-gacha-db');
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
-    const rows = (await all(store)).filter(c => (c.count || 0) > 0);
-    out.cards = rows.length;
-    out.copies = rows.reduce((n, c) => n + Math.floor(c.count || 0), 0);
-    out.pending = (await all('sync_queue')).filter(e => String(e.lang || '').toUpperCase() === lang.toUpperCase()).length;
-    return out;
-  } finally {
-    db.close();
-  }
+    try {
+      out.present = true;
+      const store = 'cards_' + lang.toLowerCase();
+      const names = Array.from(db.objectStoreNames);
+      if (!names.includes(store)) return out;
+      const tx = db.transaction([store, 'sync_queue'], 'readonly');
+      const all = (s) => new Promise((resolve, reject) => {
+        const req = tx.objectStore(s).getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const rows = (await all(store)).filter(c => (c.count || 0) > 0);
+      out.cards = rows.length;
+      out.copies = rows.reduce((n, c) => n + Math.floor(c.count || 0), 0);
+      out.pending = (await all('sync_queue')).filter(e => String(e.lang || '').toUpperCase() === lang.toUpperCase()).length;
+      return out;
+    } finally {
+      db.close();
+    }
+  };
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('délai dépassé')), timeoutMs); });
+  const work = read();
+  work.catch(() => {});
+  try { return await Promise.race([work, limit]); } finally { clearTimeout(timer); }
 }
 """
 
@@ -233,8 +263,34 @@ def prune_backups(directory: Path, keep: int = BACKUPS_KEPT) -> None:
 
 
 # -- navigateur --------------------------------------------------------------------------------------
+def _describe(exc: Exception) -> str:
+    """Message court d'une erreur : celle d'un site telle quelle, celle de Playwright réduite à sa première
+    ligne (le « Call log » qui suit est du bruit dans les journaux et le résumé)."""
+    if isinstance(exc, SiteError):
+        return str(exc)
+    lines = str(exc).strip().splitlines()
+    return (lines[0] if lines else type(exc).__name__)[:160]
+
+
+def _challenge_error(where: str, status: int, mitigated: str | None) -> SiteError:
+    """Un défi n'est jamais contourné ; pour le passer, c'est le propriétaire qui le fait, dans Chrome visible."""
+    return SiteError(
+        f"défi Cloudflare servi sur {where} (HTTP {status}, cf-mitigated: {mitigated or 'absent'}) ; le bot ne le "
+        "contourne pas : lancez « python -m wikitcg_bot login wikigacha » (Chrome visible, même profil) pour passer "
+        "le contrôle vous-même, puis relancez.")
+
+
 def _fetch(page: Page, path: str) -> tuple[int, Any]:
-    reply = page.evaluate(_FETCH_JS, path)
+    """GET same-origin depuis la page : (statut, corps JSON ou None). Délai dépassé ou défi Cloudflare : SiteError."""
+    route = path.split("?")[0]
+    try:
+        reply = page.evaluate(_FETCH_JS, [path, FETCH_TIMEOUT_MS])
+    except PlaywrightError as exc:
+        raise SiteError(f"GET {route} impossible : {_describe(exc)}") from exc
+    if reply.get("error"):
+        raise SiteError(f"GET {route} sans réponse ({reply['error']}).")
+    if is_challenge("", reply.get("mitigated")):
+        raise _challenge_error(route, reply["status"], reply["mitigated"])
     return reply["status"], reply["body"]
 
 
@@ -244,8 +300,8 @@ def _progress_path(include_cards: bool) -> str:
 
 def _cloud_progress(page: Page, include_cards: bool = False) -> Any:
     status, body = _fetch(page, _progress_path(include_cards))
-    if status in (401, 403):
-        raise AuthError(f"GET /api/user/progress → {status} : session Wikipedia Gacha refusée.")
+    if status == 401:  # seul un refus explicite de la session en est un : un 403/5xx peut être le réseau ou le CDN
+        raise AuthError("GET /api/user/progress → 401 : session Wikipedia Gacha refusée.")
     if status != 200 or not isinstance(body, dict):
         raise SiteError(f"GET /api/user/progress → {status} : réponse inattendue.")
     return body
@@ -260,7 +316,10 @@ def _cloud_collection(page: Page) -> Collection:
 
 def _local_collection(page: Page) -> tuple[Collection, int]:
     """(collection de la base locale du navigateur, nombre de changements en attente de synchronisation)."""
-    local = page.evaluate(_LOCAL_JS, LANG)
+    try:
+        local = page.evaluate(_LOCAL_JS, [LANG, LOCAL_TIMEOUT_MS])
+    except PlaywrightError as exc:
+        raise SiteError(f"Base locale du navigateur illisible : {_describe(exc)}") from exc
     return Collection(local["cards"], local["copies"]), local["pending"]
 
 
@@ -277,13 +336,15 @@ def _open_site(page: Page) -> None:
     status = response.status if response else 0
     mitigated = response.headers.get("cf-mitigated") if response else None
     if is_challenge(page.title(), mitigated, status):
-        raise SiteError(
-            f"défi Cloudflare servi à ce navigateur (HTTP {status}, cf-mitigated: {mitigated or 'absent'}) : "
-            "essayez HEADLESS=0 depuis votre connexion habituelle ; le bot ne le contourne pas.")
+        raise _challenge_error("la page d'accueil", status, mitigated)
     session_status, session = _fetch(page, "/api/auth/session")
-    if session_status != 200 or not signed_in(session):
+    # NextAuth répond 200 `{}` sans session : seul cela (ou un 401) est une session expirée. Un 429/5xx ou une
+    # réponse qui n'est pas du JSON est une panne passagère ou un blocage, pas une raison de se reconnecter.
+    if session_status == 401 or (session_status == 200 and isinstance(session, dict) and not signed_in(session)):
         raise AuthError("Session Wikipedia Gacha expirée : reconnectez-vous avec "
                         "« python -m wikitcg_bot login wikigacha ».")
+    if session_status != 200 or not isinstance(session, dict):
+        raise SiteError(f"GET /api/auth/session → {session_status} : réponse inattendue (panne passagère ou blocage ?).")
 
 
 def _wait_for_game(page: Page, timeout_s: float = 40.0) -> str:
@@ -315,13 +376,20 @@ def _dismiss_overlays(page: Page, patience_s: float | None = None) -> None:
             manage.first.click()
             page.wait_for_timeout(700)
             # Le consentement est refusé d'office ; seuls les « intérêts légitimes » sont cochés par défaut.
+            toggles = page.locator("[role=dialog]:visible").locator(
+                "input[type=checkbox], [role=switch], [role=checkbox]")
             unchecked = 0
-            for toggle in page.locator("[role=dialog]:visible").locator(
-                    "input[type=checkbox], [role=switch], [role=checkbox]").all():
+            for toggle in toggles.all():
                 label = toggle.get_attribute("aria-label") or ""
-                if LEGITIMATE_INTEREST.match(label) and toggle.evaluate("e => e.checked ?? e.ariaChecked === 'true'"):
+                if LEGITIMATE_INTEREST.match(label) and toggle.evaluate(TOGGLE_IS_ON):
                     toggle.evaluate("e => e.click()")
                     unchecked += 1
+            # Le refus se vérifie au lieu de se supposer : si le bandeau a changé de balisage, la valeur par
+            # défaut (intérêts légitimes de dizaines de fournisseurs) ne doit pas être validée à notre insu.
+            still_on = sum(1 for toggle in toggles.all() if toggle.evaluate(TOGGLE_IS_ON_AND_ENABLED))
+            if still_on:
+                raise SiteError(f"Bandeau de consentement : {still_on} option(s) restent cochées après le refus ; "
+                                "le bot ne valide pas un consentement qu'il n'a pas pu refuser (le bandeau a-t-il changé ?).")
             confirm = page.get_by_role("button", name=CONSENT_CONFIRM)
             if not confirm.count():
                 raise SiteError("Bandeau de consentement : bouton « Confirmer les choix » introuvable.")
@@ -383,15 +451,21 @@ def _backup_if_due(page: Page, settings: Settings, expected: Collection) -> None
 
 
 def _converge(page: Page, cloud: Collection) -> tuple[Collection, str | None]:
-    """Attend (≤ GATE_WAIT_S) que la base locale rejoigne le cloud : (résumé cloud, raison du blocage ou None)."""
+    """Attend (≤ GATE_WAIT_S) que la base locale rejoigne le cloud : (résumé cloud, raison du blocage ou None).
+
+    La base locale se lit à chaque tour (sans requête réseau) ; le résumé du cloud, lui, n'est relu qu'au
+    rythme de CLOUD_READ_GAP_S.
+    """
     deadline = time.monotonic() + GATE_WAIT_S
+    read_at = time.monotonic()
     while True:
         local, pending = _local_collection(page)
         reason = collection_gate(cloud, local, pending)
         if reason is None or time.monotonic() >= deadline:
             return cloud, reason
         page.wait_for_timeout(GATE_POLL_MS)
-        cloud = _cloud_collection(page)
+        if time.monotonic() - read_at >= CLOUD_READ_GAP_S:
+            cloud, read_at = _cloud_collection(page), time.monotonic()
 
 
 def _gacha_responses(page: Page) -> list[Response]:
@@ -418,10 +492,24 @@ def _gacha_failure(seen: list[Response]) -> str | None:
     return f"HTTP {last.status}" + (f" ({detail})" if detail else "")
 
 
+def _drawn_cards(seen: list[Response]) -> list[Card]:
+    """Cartes des réponses réussies de /api/gacha. Ne lève jamais : sert aussi après un échec, pour consigner
+    un pack déjà consommé côté serveur."""
+    cards: list[Card] = []
+    for response in seen:
+        if response.ok:
+            try:
+                cards = parse_cards(response.json()) or cards
+            except (PlaywrightError, ValueError):
+                log.warning("Réponse de /api/gacha illisible.")
+    return cards
+
+
 def _open_one(page: Page, seen: list[Response]) -> list[Card] | None:
     """Touche le pack, lit les cartes dans la réponse de /api/gacha, revient à l'écran des packs.
 
-    Rend None si le pack n'a pas réagi parce que le stock est en fait vide.
+    Rend None si le pack n'a pas réagi parce que le stock est en fait vide. Une erreur après la réponse de
+    /api/gacha laisse les cartes dans `seen` : l'appelant les consigne quand même (`_drawn_cards`).
     """
     seen.clear()
     _dismiss_overlays(page, patience_s=0)  # une fenêtre tardive (consentement, annonce) cacherait le pack
@@ -444,29 +532,34 @@ def _open_one(page: Page, seen: list[Response]) -> list[Card] | None:
         failure = _gacha_failure(seen) if waited > 20 else None
         if failure:
             raise SiteError(f"POST /api/gacha refusé : {failure}.")
-        if waited > 60:
+        if waited > RESULTS_WAIT_S:
             raise SiteError("L'écran des résultats n'est pas apparu après l'ouverture du pack.")
         page.wait_for_timeout(400)
-    cards: list[Card] = []
-    for response in seen:
-        if response.ok:
-            cards = parse_cards(response.json()) or cards
+    cards = _drawn_cards(seen)
     if not cards:
         raise SiteError("Aucune carte dans la réponse de /api/gacha : le site a-t-il changé ?")
-    back.first.click()
+    back.first.click(timeout=BACK_CLICK_TIMEOUT_MS)
     page.wait_for_timeout(500)
     return cards
 
 
 def _wait_for_sync(page: Page, before: Collection, drawn: int) -> tuple[str, Collection, int]:
-    """Attend la synchronisation différée (≤ SYNC_WAIT_S) : (verdict, résumé cloud, changements en attente)."""
+    """Attend la synchronisation différée (≤ SYNC_WAIT_S) : (verdict, résumé cloud, changements en attente).
+
+    La file locale `sync_queue` se lit sans requête réseau ; le cloud n'est relu qu'une fois la file vidée (le
+    client a rejoué les ouvertures), puis au rythme de CLOUD_READ_GAP_S, et une dernière fois à l'échéance.
+    """
     deadline = time.monotonic() + SYNC_WAIT_S
+    read_at: float | None = None
     while True:
         _, pending = _local_collection(page)
-        after = _cloud_collection(page)
-        verdict = judge_growth(before, after, drawn)
-        if verdict == "dropped" or (verdict == "ok" and pending == 0) or time.monotonic() >= deadline:
-            return verdict, after, pending
+        now = time.monotonic()
+        expired = now >= deadline
+        if expired or (pending == 0 and (read_at is None or now - read_at >= CLOUD_READ_GAP_S)):
+            after, read_at = _cloud_collection(page), now
+            verdict = judge_growth(before, after, drawn)
+            if verdict == "dropped" or (verdict == "ok" and pending == 0) or expired:
+                return verdict, after, pending
         page.wait_for_timeout(SYNC_POLL_MS)
 
 
@@ -517,34 +610,57 @@ class WikiGacha:
 
     def _open_packs(self, page: Page, settings: Settings, result: SiteResult, start: Collection) -> None:
         seen = _gacha_responses(page)
-        drawn, stock, failure = 0, result.packs_before or 0, ""
+        drawn, stock = 0, result.packs_before or 0
+        cause: SiteError | None = None
+        touched = False  # un pack est touché mais pas encore consigné : s'il échoue, il a pu être consommé
+        read_at = time.monotonic()
         try:
             while stock > 0 and result.opened < settings.max_packs:
+                touched = True
                 cards = _open_one(page, seen)
                 if cards is None:
-                    stock = 0
+                    stock, touched = 0, False
                     break
                 result.opened += 1
                 result.cards.extend(cards)
                 drawn += len(cards)
-                # Une baisse du cloud, même passagère, arrête tout sur-le-champ.
-                if judge_growth(start, _cloud_collection(page), 0) == "dropped":
-                    self._alarm(result, f"le cloud a PERDU des cartes après {result.opened} pack(s) (départ : {start})")
-                    return
-                now = parse_stock(_body_text(page))
+                touched = False
+                # Une baisse du cloud, même passagère, arrête tout sur-le-champ (relevé espacé, voir CLOUD_READ_GAP_S).
+                if time.monotonic() - read_at >= CLOUD_READ_GAP_S:
+                    read_at = time.monotonic()
+                    if judge_growth(start, _cloud_collection(page), 0) == "dropped":
+                        self._alarm(result, f"le cloud a PERDU des cartes après {result.opened} pack(s) (départ : {start})")
+                        return
+                # Un stock illisible n'est pas un stock vide : on attend l'écran des packs (ou « Plus de packs »).
+                now = parse_stock(_wait_for_game(page, timeout_s=10))
                 stock = now[0] if now else 0
                 if stock > 0 and result.opened < settings.max_packs:
                     pause(settings)
-        except SiteError as exc:  # on garde ce qui a déjà été ouvert et on laisse la synchronisation finir
-            failure = str(exc)
-            result.auth_failed = isinstance(exc, AuthError)
+        except (SiteError, PlaywrightError) as exc:
+            # On garde ce qui a déjà été ouvert et on laisse la synchronisation finir.
+            cause = exc if isinstance(exc, SiteError) else SiteError(_describe(exc))
+            result.auth_failed = isinstance(cause, AuthError)
+            late = _drawn_cards(seen) if touched else []
+            if late:  # la réponse de /api/gacha est arrivée avant l'échec : le pack est bien consommé
+                result.opened += 1
+                result.cards.extend(late)
+                drawn += len(late)
+        failure = str(cause) if cause else ""
         if not drawn:
-            if failure:
-                raise SiteError(failure)
+            if cause:
+                raise cause
             result.message = "Aucun pack n'a pu être ouvert (le stock affiché était vide)."
             return
 
-        verdict, end, pending = _wait_for_sync(page, start, drawn)
+        try:
+            verdict, end, pending = _wait_for_sync(page, start, drawn)
+        except (SiteError, PlaywrightError) as exc:
+            # Les packs sont ouverts et consignés : une relecture impossible ne doit pas les effacer du rapport.
+            result.auth_failed = result.auth_failed or isinstance(exc, AuthError)
+            self._alarm(result, f"{failure + ' ; ' if failure else ''}synchronisation non vérifiée après {result.opened} "
+                                f"pack(s) ouvert(s) ({_describe(exc)}) ; les exemplaires tirés seront rejoués au prochain "
+                                "run, vérifiez la collection")
+            return
         if verdict == "dropped":
             self._alarm(result, f"le cloud a PERDU des cartes : {start} avant, {end} après")
         elif verdict == "pending":
