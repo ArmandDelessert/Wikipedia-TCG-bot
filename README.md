@@ -1,105 +1,120 @@
 # Wikipedia-TCG-bot
 
-Ouvre automatiquement, depuis **GitHub Actions**, les boosters qui se regénèrent sur des jeux de
-cartes à collectionner basés sur Wikipédia. Plus besoin de rester sur les sites : un workflow
-planifié se connecte à votre compte, ouvre les packs disponibles et publie un résumé (packs
-ouverts, raretés, cartes tirées) dans l'onglet *Summary* du run.
+Ouvre automatiquement, **depuis votre poste Windows**, les boosters gratuits qui se rechargent sur
+quatre jeux de cartes à collectionner tirés de Wikipédia. Une tâche planifiée repasse toutes les
+10 minutes, se connecte avec votre session, ouvre les packs disponibles et note les cartes tirées
+dans un historique local.
 
-Le bot **n'ouvre que des packs**. Il ne touche ni au marché, ni aux enchères, ni aux échanges, et
-ne simule aucun visionnage de publicité.
+Le bot **n'ouvre que des packs**. Il ne dépense rien, ne touche ni au marché, ni aux enchères, ni
+aux échanges, ne réclame ni mission ni récompense, ne regarde aucune publicité et ne résout ni ne
+contourne aucun défi anti-bot : si un site en présente un, le bot s'arrête et le dit.
+
+## Pourquoi en local
+
+Cloudflare bloque les runners de GitHub Actions pour `wikitcg.net` et `wikigacha.com` (réponse 403
+`cf-mitigated: challenge`, mesurée le 20 octobre 2026), et le formulaire de connexion de WikiMasters
+est protégé par un Turnstile. Depuis votre connexion habituelle, aucun de ces défis n'apparaît.
+Autre avantage : aucun secret chez GitHub, le dépôt peut rester public.
 
 ## État de chaque site
 
-| Site | Module | Connexion | Ce qui est vérifié |
+| Site | Session | Ouverture | Vérifié en réel (21/10/2026) |
 |---|---|---|---|
-| [WikiMasters](https://www.wiki-masters.com/) | `sites/wikimasters.py` | e-mail + mot de passe (ou session exportée) | Connexion et boucle d'ouverture testées contre un faux site local avec un vrai Chromium. L'endpoint `POST /api/packs/open` est celui des bots Sephiroth-ctrl et JeanMichelChien. **Jamais lancé contre le vrai site.** |
-| [wikitcg.net](https://wikitcg.net/) | `sites/wikitcg_net.py` | cookie `wtcg_session` | Logique testée contre une fausse API ; endpoints repris de dochreidte/wikitcg-completer. **Jamais lancé contre le vrai site.** |
-| [Wikipedia Gacha](https://wikigacha.com/) | `sites/wikigacha.py` | session exportée depuis votre navigateur | **Expérimental.** Seuls les libellés des boutons (`TAP TO OPEN`, `BACK TO PACKS`) sont connus, d'après le bookmarklet de Clifeee. S'arrête quand le site propose une recharge par publicité. |
-| [WikiTCG](https://wiki-tcg.com/) | `sites/wiki_tcg_com.py` | — | **Pas implémenté** : aucune référence, site non inspecté. Lancez le workflow *Probe* (voir plus bas). |
+| [wikitcg.net](https://wikitcg.net/) | cookie `wtcg_session` (14 jours) | API HTTP, sans navigateur | oui : 1 pack gratuit, 5 cartes lues |
+| [wiki-tcg.com](https://wiki-tcg.com/) | cookie `wikitcg_session` (30 jours) | état par API, ouverture par Chrome | oui : 5 boosters, état avant/après recoupé |
+| [Wikipedia Gacha](https://wikigacha.com/) | cookie NextAuth (30 jours glissants) | Chrome, profil persistant, FR | oui : 6 packs, cloud 1279 → 1309 cartes, aucune baisse |
+| [WikiMasters](https://www.wiki-masters.com/) | profil Chrome dédié (`login`) | `POST /api/packs/open` depuis la page | **non** : il faut d'abord vous connecter une fois |
 
-Les sites n'ont pas pu être inspectés lors du développement (accès réseau bloqué). Faites donc un
-premier run en **simulation** et vérifiez le résultat avant de laisser tourner le planning.
+Rythmes de recharge : Wikipedia Gacha 1 pack par minute (plafond 10), WikiMasters 1 par 10 min
+(plafond 10), wiki-tcg.com 1 par 15 min (plafond 10), wikitcg.net 1 pack gratuit toutes les ~2 h 40
+(plafond 5). Le bot ne relance un site que lorsque son stock approche du plafond (voir
+`wikitcg_bot/schedule.py`) ; `run --force` ignore ce planning.
 
 ## Mise en route
 
-1. **Utilisez ce dépôt en privé** (voir [Sécurité](#sécurité-et-coût)).
-2. Ajoutez vos identifiants dans *Settings → Secrets and variables → Actions → Secrets* :
+Prérequis : Windows, Python 3.12+, Google Chrome installé.
 
-   | Secret | Pour | Contenu |
-   |---|---|---|
-   | `WIKIMASTERS_EMAIL`, `WIKIMASTERS_PASSWORD` | WikiMasters | vos identifiants |
-   | `WIKIMASTERS_STORAGE_STATE` | WikiMasters (alternative) | session exportée, si vous vous connectez autrement que par e-mail |
-   | `WIKITCG_NET_SESSION` | wikitcg.net | valeur du cookie `wtcg_session` : connectez-vous, ouvrez les outils de développement → *Application/Stockage → Cookies* |
-   | `WIKIGACHA_STORAGE_STATE` | Wikipedia Gacha | session exportée (voir ci-dessous) |
-
-   Un site sans secret est simplement ignoré.
-3. *Actions → Open packs → Run workflow*, avec **dry_run** coché. Le résumé indique pour chaque
-   site s'il s'est connecté et combien de packs étaient disponibles.
-4. Relancez sans `dry_run`. Si tout est bon, le planning (`cron`) prend le relais.
-
-### Exporter une session (Wikipedia Gacha, ou WikiMasters hors e-mail)
-
-```bash
-pip install -r requirements.txt && python -m playwright install chromium
-python scripts/save_session.py wikigacha
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-Connectez-vous dans la fenêtre qui s'ouvre, appuyez sur Entrée dans le terminal, puis collez le
-contenu de `wikigacha.state.b64` dans le secret. Ce fichier donne accès à votre compte.
+1. **Exportez vos cookies** depuis votre navigateur (extension « cookies.txt », format Netscape) pour
+   `wikitcg.net`, `wiki-tcg.com` et `wikigacha.com`, et placez-les dans `Cookies/` sous le nom
+   `<hôte>_cookies.txt` (par exemple `wikitcg.net_cookies.txt`). Ce dossier est ignoré par Git.
+   **Ne le faites pas pour WikiMasters** (voir plus bas).
+2. **WikiMasters** : `.\.venv\Scripts\python -m wikitcg_bot login wikimasters`, connectez-vous à la
+   main dans la fenêtre Chrome qui s'ouvre (le bot ne voit jamais votre mot de passe), puis
+   appuyez sur Entrée dans le terminal.
+3. Vérifiez sans rien ouvrir : `.\.venv\Scripts\python -m wikitcg_bot status`
+4. Un premier tour : `.\.venv\Scripts\python -m wikitcg_bot run`
+5. Planifiez-le : `.\scripts\install_task.ps1` (toutes les 10 minutes ; `-Uninstall` pour retirer).
 
-### Variables optionnelles (*Variables*, pas *Secrets*)
+### Commandes
 
-| Variable | Défaut | Effet |
-|---|---|---|
-| `MAX_PACKS_PER_RUN` | 10 | plafond de packs ouverts par site et par run |
-| `WIKITCG_NET_SERIES` | automatique | série à ouvrir ; sinon celle où il manque le plus de cartes |
+| Commande | Effet |
+|---|---|
+| `python -m wikitcg_bot` ou `run` | ouvre les packs des sites dont le stock le justifie |
+| `run --sites wikigacha,wiki_tcg_com` | seulement ces sites, sans tenir compte du planning |
+| `run --dry-run` / `status` | lit l'état et les sessions, n'ouvre rien |
+| `login <site>` | connexion manuelle dans Chrome ; la session est conservée |
 
-## Fréquence : ce qu'il faut savoir
+Codes de sortie : 0 tout va bien, 1 erreur, 2 session expirée ou refusée (reconnectez-vous ou refaites
+l'export), 3 un autre run est en cours.
 
-Les packs **s'accumulent** jusqu'à un plafond (le résumé affiche `stock avant/plafond`). Un run
-périodique suffit donc, tant qu'il passe avant que le stock soit plein. Si la colonne *Stock avant*
-affiche souvent le plafond, des packs sont perdus : rapprochez les runs.
+Réglages facultatifs : copiez `.env.example` en `.env` (nombre maximal de packs par run, navigateur,
+fenêtre visible avec `HEADLESS=0`…).
 
-- Le cron par défaut est **toutes les heures** (`17 * * * *`) ; modifiez-le dans
-  `.github/workflows/open-packs.yml`. Le minimum de GitHub est 5 minutes et les runs peuvent être
-  retardés de plusieurs minutes : ce n'est pas du temps réel.
-- Un run avec Chromium dure environ 2 à 3 minutes. Sur un dépôt **privé**, le quota gratuit est de
-  2 000 minutes par mois : une fois par heure tient dedans, deux fois par heure non. Les dépôts
-  publics n'ont pas cette limite.
-- GitHub **désactive les workflows planifiés** d'un dépôt public sans activité depuis 60 jours ;
-  réactivez-le dans l'onglet *Actions*.
-- Si des identifiants sont refusés, le run échoue avec une annotation d'erreur : GitHub vous envoie
-  alors un e-mail.
+## Où vont les données
 
-## Sécurité et coût
+Tout ce qui est sensible reste sur votre disque, dans des dossiers ignorés par Git :
 
-- Les secrets ne sont jamais affichés dans les logs, mais le **résumé et les logs d'un dépôt
-  public sont publics** (nombre de packs, cartes tirées).
-- Le cookie de wikitcg.net est renouvelé par le serveur à chaque appel ; le bot le conserve d'un
-  run à l'autre dans le cache GitHub Actions (un secret ne peut pas être modifié depuis un
-  workflow). Sur un dépôt public, le cache est lisible par des workflows de pull requests : gardez
-  le dépôt privé, ou exigez l'approbation des contributeurs extérieurs.
-- Automatiser un site peut contrevenir à ses conditions d'utilisation et conduire à une
-  restriction du compte. Le bot s'espace de 2 à 4 s entre deux ouvertures et plafonne le nombre de
-  packs par run ; ne le poussez pas plus loin. Vous utilisez ce projet à vos risques.
+| Chemin | Contenu |
+|---|---|
+| `Cookies/` | vos exports de cookies (lecture seule pour le bot) |
+| `.state/sessions/<site>.json` | cookies courants, y compris ceux que les sites ont renouvelés |
+| `.state/profiles/<site>/` | profils Chrome (WikiMasters, Wikipedia Gacha) |
+| `.state/history.jsonl` | une ligne par run et par site : cartes tirées et raretés |
+| `.state/backups/` | sauvegarde quotidienne de votre collection Wikipedia Gacha (côté serveur) |
+| `.state/logs/bot.log` | journal du bot (jamais de valeur de cookie) |
 
-## Compléter le support de wiki-tcg.com (et fiabiliser le reste)
+Ces fichiers donnent accès à vos comptes : ne les partagez pas et ne les copiez pas dans le dépôt.
 
-*Actions → Probe → Run workflow* décrit les 4 sites depuis un runner GitHub : boutons, champs de
-formulaire, liens et appels réseau (jamais de cookie ni d'en-tête). Le résultat est dans le
-*Summary* du run ; sur un dépôt privé, des captures d'écran sont aussi disponibles en artefact.
-Avec les secrets `*_STORAGE_STATE` définis (`WIKI_TCG_COM_STORAGE_STATE` pour wiki-tcg.com), la
-sonde parcourt les pages connectées. C'est la base pour écrire `wiki_tcg_com.py` et corriger
-les modules si un site a changé.
+### Les cookies et leur renouvellement
+
+Un export au format Netscape est un fichier texte de 7 colonnes séparées par des tabulations :
+`domaine`, `inclut les sous-domaines`, `chemin`, `HTTPS seulement`, `expiration` (secondes Unix,
+0 = cookie de session), `nom`, `valeur`.
+
+- Le bot repart de l'export, puis **réécrit les cookies renouvelés** dans `.state/sessions/` à chaque
+  run : ce qu'un site renouvelle est donc conservé sans rien faire. Un export plus récent que cet état
+  le remplace.
+- `wikitcg.net` : 14 jours, aucun renouvellement observé. `status` prévient quand il reste moins de
+  3 jours : refaites alors un export.
+- **WikiMasters** utilise Supabase, dont le jeton de rafraîchissement ne sert qu'une fois. Réutiliser un
+  export déconnecterait votre navigateur : le bot n'importe donc jamais cet export et travaille avec sa
+  propre session, créée par `login wikimasters`.
+
+## Limites connues
+
+- Wikipedia Gacha et WikiMasters créditent ou proposent des récompenses (missions, « récompense de
+  connexion » de wiki-tcg.com, packs de complétion de wikitcg.net) : le bot ne les réclame pas, faute
+  d'autorisation explicite. Elles vous attendent à votre prochaine visite.
+- Les packs spéciaux de WikiMasters et de wiki-tcg.com ne sont pas vérifiés en réel.
+- Se déconnecter d'un site dans le navigateur d'où vient l'export peut invalider la session exportée
+  (non vérifié) : évitez-le, ou refaites un export ensuite.
+- Automatiser un site peut contrevenir à ses conditions d'utilisation et conduire à la restriction
+  du compte. Le bot espace les ouvertures de 2 à 4 secondes et plafonne chaque run (10 packs par
+  site par défaut). Vous l'utilisez à vos risques.
 
 ## Développement
 
-```bash
-pip install -r requirements-dev.txt && python -m playwright install chromium
-python -m pytest -q                       # tests UI ignorés sans CI=1 ni CHROMIUM_PATH
-python -m wikitcg_bot --sites wikitcg_net --dry-run
+```powershell
+.\.venv\Scripts\python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python -m pytest -q          # les tests de navigateur utilisent le Chrome installé
 ```
 
-Pour ajouter un site : créer `wikitcg_bot/sites/<site>.py` avec `name`, `label`,
-`configured(settings)` et `run(settings) -> SiteResult`, puis l'enregistrer dans
-`wikitcg_bot/sites/__init__.py`.
+Les notes d'exploration des sites (endpoints, sélecteurs, pièges) sont dans
+[`docs/exploration.md`](docs/exploration.md). Pour ajouter un site : créer `wikitcg_bot/sites/<site>.py`
+avec `name`, `label`, `hosts`, `login_url`, `configured`, `session_summary` et `run`, l'enregistrer
+dans `wikitcg_bot/sites/__init__.py` et ajouter sa cadence de recharge dans `wikitcg_bot/schedule.py`.
