@@ -1,13 +1,15 @@
 # Enregistre (ou retire) la tâche planifiée Windows qui lance le bot à intervalle régulier.
 #
-#   .\scripts\install_task.ps1                      toutes les 60 minutes
-#   .\scripts\install_task.ps1 -EveryMinutes 30
+#   .\scripts\install_task.ps1                      toutes les 10 minutes
+#   .\scripts\install_task.ps1 -EveryMinutes 5
 #   .\scripts\install_task.ps1 -Uninstall
 #
 # La tâche tourne sous votre compte, uniquement quand vous êtes connecté, sans fenêtre visible.
 # Si l'ordinateur était éteint à l'heure prévue, elle se lance dès que possible ensuite.
+# Le bot décide seul quels sites relancer (Wikipedia Gacha se recharge d'un pack par minute, les autres bien
+# plus lentement) : un passage toutes les 10 minutes suffit à ne rien perdre, sans lancer Chrome pour rien.
 param(
-    [int]$EveryMinutes = 60,
+    [int]$EveryMinutes = 10,
     [switch]$Uninstall
 )
 
