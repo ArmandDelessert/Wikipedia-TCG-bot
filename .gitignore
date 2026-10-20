@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Wikipedia-TCG-bot
+.state/
+*.state.b64
+probe-output/

@@ -1,0 +1,80 @@
+name: Open packs
+
+on:
+  schedule:
+    # Une fois par heure, à une minute « creuse » (GitHub retarde les crons de :00 et :30).
+    # Pour ouvrir plus souvent : "17,47 * * * *" (deux fois par heure). Voir le README (coût).
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      sites:
+        description: "Sites à traiter, séparés par des virgules (vide = tous ceux dont les secrets sont définis)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Simulation : se connecte et lit l'état, n'ouvre rien"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Un seul run à la fois : deux runs simultanés se disputeraient les mêmes packs.
+concurrency:
+  group: open-packs
+  cancel-in-progress: false
+
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WIKIMASTERS_EMAIL: ${{ secrets.WIKIMASTERS_EMAIL }}
+      WIKIMASTERS_PASSWORD: ${{ secrets.WIKIMASTERS_PASSWORD }}
+      WIKIMASTERS_STORAGE_STATE: ${{ secrets.WIKIMASTERS_STORAGE_STATE }}
+      WIKIGACHA_STORAGE_STATE: ${{ secrets.WIKIGACHA_STORAGE_STATE }}
+      WIKITCG_NET_SESSION: ${{ secrets.WIKITCG_NET_SESSION }}
+      WIKITCG_NET_SERIES: ${{ vars.WIKITCG_NET_SERIES }}
+      MAX_PACKS_PER_RUN: ${{ vars.MAX_PACKS_PER_RUN }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      SITES_INPUT: ${{ inputs.sites }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Chromium n'est nécessaire que pour WikiMasters et Wikipedia Gacha.
+      - name: Cache Playwright browsers
+        if: env.WIKIMASTERS_EMAIL != '' || env.WIKIMASTERS_STORAGE_STATE != '' || env.WIKIGACHA_STORAGE_STATE != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Chromium
+        if: env.WIKIMASTERS_EMAIL != '' || env.WIKIMASTERS_STORAGE_STATE != '' || env.WIKIGACHA_STORAGE_STATE != ''
+        run: python -m playwright install --with-deps chromium
+
+      # Le cookie de wikitcg.net est renouvelé par le serveur à chaque appel : on le garde
+      # d'un run à l'autre (les secrets, eux, ne sont pas modifiables depuis un workflow).
+      - name: Restore refreshed sessions
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: sessions-${{ github.run_id }}
+          restore-keys: sessions-
+
+      - name: Open packs
+        run: python -m wikitcg_bot --sites "$SITES_INPUT"
+
+      - name: Save refreshed sessions
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: sessions-${{ github.run_id }}
