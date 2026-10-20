@@ -59,9 +59,12 @@ class FakeWikiTcg:
     """Simule le sous-ensemble de l'API utilisé par le bot (formes observées sur le vrai site)."""
 
     def __init__(self, free=3, paid=0, mystery="mystery_not_eligible", completion=(), renew=None,
-                 next_regen=None, override=None):
+                 next_regen=None, override=None, echo_stock=True, reported=None):
         self.free, self.paid, self.mystery, self.completion = free, paid, mystery, list(completion)
         self.renew, self.next_regen, self.override = renew, next_regen, override
+        # Le client du site relit /api/packs/status après chaque ouverture : sa réponse d'ouverture ne
+        # porte vraisemblablement pas le stock (`echo_stock=False`). `reported` : stock que le statut annonce.
+        self.echo_stock, self.reported = echo_stock, reported
         self.opened, self.requests, self.cookie_headers = [], [], []
 
     def paths(self):
@@ -81,8 +84,9 @@ class FakeWikiTcg:
             return forced
         if path == "/api/packs/status":
             headers = {"set-cookie": f"wtcg_session={self.renew}; Path=/; Secure; HttpOnly"} if self.renew else {}
+            shown = self.free if self.reported is None else self.reported
             return httpx.Response(200, headers=headers, json={
-                "freePacks": self.free, "paidPacks": self.paid, "totalAvailable": self.free + self.paid,
+                "freePacks": shown, "paidPacks": self.paid, "totalAvailable": shown + self.paid,
                 "nextRegenAt": self.next_regen or int((time.time() + 7500) * 1000), "maxFreePacks": 5,
                 "completionPacks": self.completion, "ink": 70, "level": 2})
         if path == "/api/series":
@@ -102,10 +106,11 @@ class FakeWikiTcg:
                 return httpx.Response(400, json={"error": "no_packs_available"})
             self.free -= 1
             self.opened.append(body["seriesId"])
-            return httpx.Response(200, json={
-                "cards": [{"id": "c1", "rarity": "UR", "article": {"title": "Paris"}},
-                          {"id": "c2", "rarity": "C", "article": {"title": "Seine"}}],
-                "totalAvailable": self.free + self.paid, "freePacks": self.free, "xpEarned": 10})
+            opened = {"cards": [{"id": "c1", "rarity": "UR", "article": {"title": "Paris"}},
+                                {"id": "c2", "rarity": "C", "article": {"title": "Seine"}}], "xpEarned": 10}
+            if self.echo_stock:
+                opened.update(totalAvailable=self.free + self.paid, freePacks=self.free)
+            return httpx.Response(200, json=opened)
         return httpx.Response(404, json={"error": "not_found"})
 
 
@@ -155,7 +160,14 @@ def test_free_stock_never_counts_paid_packs():
     assert free_stock({"freePacks": 2, "paidPacks": 3, "totalAvailable": 5}) == 2
     assert free_stock({"freePacks": 0, "paidPacks": 3, "totalAvailable": 3}) == 0
     assert free_stock({"paidPacks": 1, "totalAvailable": 4}) == 3  # sans `freePacks`
-    assert free_stock({}) == 0
+    assert free_stock({"freePacks": -2}) == 0  # compteur négatif : jamais de stock fantôme
+
+
+def test_free_stock_is_unknown_not_zero_when_the_status_does_not_say():
+    for status in ({}, {"error": "maintenance"}, {"data": {"freePacks": 3}}, {"freePacks": None},
+                   {"freePacks": True}, {"freePacks": "3"}, {"totalAvailable": 3},  # sans paidPacks : peut-être payants
+                   {"totalAvailable": 3, "paidPacks": None}, {"freePacks": float("nan")}):
+        assert free_stock(status) is None, status
 
 
 def test_regen_text():
@@ -163,6 +175,7 @@ def test_regen_text():
     assert regen_text((now + 7500) * 1000, now) == "2h 05m"
     assert regen_text((now + 600) * 1000, now) == "10m"
     assert regen_text((now - 1) * 1000, now) == "" and regen_text(None, now) == ""
+    assert regen_text(float("inf"), now) == "" and regen_text("bientôt", now) == ""
 
 
 def test_choose_series_picks_most_missing():
@@ -396,6 +409,75 @@ def test_no_free_pack_available(make_settings):
     assert "/api/series" not in api.paths()
 
 
+def status_only(body):
+    """Impose le corps de /api/packs/status ; le reste est servi par le faux site."""
+    return lambda req, _body: httpx.Response(200, json=body) if req.url.path == "/api/packs/status" else None
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"error": "maintenance"}, {"data": {"freePacks": 3}}, {"free": 3, "total": 3},
+    {"freePacks": None, "nextRegenAt": 1}, {"totalAvailable": 3},
+])
+def test_a_status_without_a_readable_stock_is_a_failure_not_an_empty_stock(make_settings, body):
+    settings = make_settings()
+    seed(settings)
+    api = FakeWikiTcg(free=3, override=status_only(body))
+    # Sinon le run passerait pour un succès à « 0 pack », le planning attendrait des heures et le stock
+    # (plafonné à 5) se perdrait en silence.
+    with pytest.raises(SiteError, match="packs/status"):
+        run(settings, api)
+    assert api.posts() == [] and api.free == 3
+
+
+def test_a_status_with_a_zero_stock_is_a_normal_empty_stock(make_settings):
+    settings = make_settings()
+    seed(settings)
+    result = run(settings, FakeWikiTcg(override=status_only({"freePacks": 0})))
+    assert result.ok and result.packs_before == 0 and result.packs_max is None
+    assert "Aucun pack gratuit" in result.message
+
+
+def test_a_malformed_max_stock_does_not_reach_the_scheduler(make_settings):
+    settings = make_settings()
+    seed(settings)
+    body = {"freePacks": 2, "maxFreePacks": "5", "nextRegenAt": 1}
+    assert run(settings, FakeWikiTcg(free=2, override=status_only(body))).packs_max is None  # plafond par défaut
+    settings.dry_run = True  # la simulation compare le stock au plafond : une chaîne y ferait lever TypeError
+    assert run(settings, FakeWikiTcg(free=2, override=status_only(body))).ok
+
+
+# La réponse d'ouverture du site ne porte vraisemblablement pas le stock (son client relit
+# /api/packs/status) : le décompte local doit tenir seul.
+@pytest.mark.parametrize("stock", [1, 3])
+def test_without_stock_in_the_open_response_exactly_the_announced_packs_are_opened(make_settings, stock):
+    settings = make_settings()
+    seed(settings)
+    api = FakeWikiTcg(free=stock, echo_stock=False)
+    result = run(settings, api)
+    assert len(api.posts("s2")) == stock and result.opened == stock and api.free == 0
+    assert result.ok and "Tous les packs gratuits" in result.message
+
+
+def test_without_stock_in_the_open_response_max_packs_is_honoured(make_settings):
+    settings = make_settings()
+    seed(settings)
+    settings.max_packs = 2
+    api = FakeWikiTcg(free=5, echo_stock=False)
+    result = run(settings, api)
+    assert len(api.posts("s2")) == 2 and result.opened == 2
+    assert "Limite de 2" in result.message and "il en reste 3" in result.message
+
+
+def test_without_stock_in_the_open_response_a_stale_status_ends_on_the_first_refusal(make_settings):
+    settings = make_settings()
+    seed(settings)
+    # Le statut annonce 3 packs mais il n'en reste qu'un (ouvert entre-temps depuis le site, par exemple).
+    api = FakeWikiTcg(free=1, reported=3, echo_stock=False)
+    result = run(settings, api)
+    assert result.ok and result.opened == 1 and len(api.posts("s2")) == 2
+    assert "refusée" in result.message and "no_packs_available" in result.message
+
+
 def test_a_refused_opening_stops_the_loop_without_failing_the_run(make_settings):
     settings = make_settings()
     seed(settings)
@@ -543,12 +625,22 @@ def test_the_mystery_pack_is_kept_even_if_its_delay_cannot_be_saved(make_setting
     assert result.ok and result.opened == 2 and result.cards[0].title == "Loab"
 
 
-def test_mystery_can_be_disabled(make_settings):
+@pytest.mark.parametrize("value", ["0", "false", "False", " no ", "non", "OFF"])
+def test_mystery_can_be_disabled(make_settings, value):
     settings = make_settings()
     seed(settings)
     api = FakeWikiTcg(free=1, mystery=None)
-    run(settings, api, WIKITCG_NET_MYSTERY="0")
+    run(settings, api, WIKITCG_NET_MYSTERY=value)
     assert api.posts("mystery") == []
+
+
+def test_mystery_stays_enabled_by_default_and_with_any_other_value(make_settings):
+    for value in ("", "1", "oui"):
+        settings = make_settings()
+        seed(settings)
+        api = FakeWikiTcg(free=0)
+        run(settings, api, WIKITCG_NET_MYSTERY=value)
+        assert len(api.posts("mystery")) == 1, value
 
 
 def test_a_corrupted_mystery_state_file_is_ignored(make_settings):
@@ -560,6 +652,58 @@ def test_a_corrupted_mystery_state_file_is_ignored(make_settings):
     api = FakeWikiTcg(free=0)
     run(settings, api)
     assert len(api.posts("mystery")) == 1
+
+
+# -- demandes de vérification ----------------------------------------------------------------
+CHECK_CODES = ["human_verification_required", "captcha_required", "rate_limited", "too_many_requests",
+               "turnstile_failed", "RateLimitExceeded"]
+
+
+def test_benign_refusal_codes_are_not_taken_for_a_verification():
+    for code in ("mystery_not_eligible", "no_packs_available", "series_not_found", "insufficient_ink", "already_full"):
+        assert not wikitcg_net.is_check_code(code), code
+    for code in CHECK_CODES:
+        assert wikitcg_net.is_check_code(code), code
+
+
+@pytest.mark.parametrize("code", CHECK_CODES)
+def test_a_verification_demand_on_the_mystery_request_stops_the_site(make_settings, code):
+    settings = make_settings()
+    seed(settings)
+    api = FakeWikiTcg(free=3, mystery=code)
+    with pytest.raises(SiteError, match="vérification") as caught:
+        run(settings, api)
+    assert not isinstance(caught.value, AuthError) and code in str(caught.value)
+    assert [b["seriesId"] for b in api.posts()] == ["mystery"]  # aucune autre ouverture n'est tentée
+    assert "/api/series" not in api.paths() and api.free == 3
+
+
+def test_a_verification_demand_sent_with_a_200_status_stops_the_site_too(make_settings):
+    settings = make_settings()
+    seed(settings)
+    ask = httpx.Response(200, json={"error": "human_verification_required"})
+    api = FakeWikiTcg(free=3, override=lambda req, body: ask if body and body.get("seriesId") == "mystery" else None)
+    with pytest.raises(SiteError, match="vérification"):
+        run(settings, api)
+    assert [b["seriesId"] for b in api.posts()] == ["mystery"]
+
+
+def test_a_verification_demand_after_some_openings_is_a_failure_not_a_green_run(make_settings):
+    settings = make_settings()
+    seed(settings)
+    api = FakeWikiTcg(free=5)
+    served = api.__call__
+    asked = []
+
+    def asks_after_one_pack(request):
+        if request.url.path == "/api/packs/open" and len(api.opened) == 1 and b"mystery" not in request.content:
+            asked.append(request)
+            return httpx.Response(403, json={"error": "human_verification_required"})
+        return served(request)
+    result = run(settings, asks_after_one_pack)
+    assert not result.ok and not result.auth_failed and result.opened == 1 and len(result.cards) == 2
+    assert "vérification" in result.message
+    assert len(asked) == 1 and len(api.posts("s2")) == 1  # une seule demande refusée : on n'insiste pas
 
 
 # -- erreurs ----------------------------------------------------------------------------------
@@ -645,13 +789,34 @@ def test_a_blocked_mystery_request_stops_the_site_before_any_other_post(make_set
     assert [b["seriesId"] for b in api.posts()] == ["mystery"]  # rien d'autre n'est envoyé au même serveur
 
 
-def test_a_persistent_rate_limit_on_openings_is_a_failure(make_settings, sleeps):
+def test_a_rate_limit_on_an_opening_is_a_failure_and_the_opening_is_not_replayed(make_settings, sleeps):
     settings = make_settings()
     seed(settings)
-    api = FakeWikiTcg(free=3, override=not_mystery(httpx.Response(429)))
+    api = FakeWikiTcg(free=3, override=not_mystery(httpx.Response(429, headers={"retry-after": "2"})))
     with pytest.raises(SiteError, match="429"):
         run(settings, api)
-    assert len(api.posts("s2")) == 3 and sleeps == [2, 4]  # 429 : rien n'a été traité, on peut réessayer
+    assert len(api.posts("s2")) == 1 and sleeps == []  # le site demande de ralentir : on s'arrête
+
+
+def test_a_rate_limit_on_the_mystery_request_is_never_replayed(make_settings, sleeps):
+    settings = make_settings()
+    seed(settings)
+    limited = httpx.Response(429, headers={"retry-after": "1"})
+    api = FakeWikiTcg(free=3, override=lambda req, body: limited if body and body.get("seriesId") == "mystery" else None)
+    with pytest.raises(SiteError, match="429"):
+        run(settings, api)
+    assert [b["seriesId"] for b in api.posts()] == ["mystery"] and sleeps == []
+
+
+@pytest.mark.parametrize("headers", [{"retry-after": "900"}, {}, {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}])
+def test_a_rate_limit_asking_for_a_long_or_unknown_wait_is_not_cut_short(make_settings, sleeps, headers):
+    settings = make_settings()
+    seed(settings)
+    # Attendre 60 s puis réessayer alors que le site en demande 900, ce serait ignorer sa demande.
+    api = FakeWikiTcg(free=3, override=lambda req, body: httpx.Response(429, headers=headers))
+    with pytest.raises(SiteError, match="429"):
+        run(settings, api)
+    assert len(api.requests) == 1 and sleeps == []
 
 
 def test_error_bodies_are_never_copied_into_messages_or_logs(make_settings, caplog):

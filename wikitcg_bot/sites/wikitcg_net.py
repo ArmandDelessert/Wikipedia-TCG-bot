@@ -33,16 +33,26 @@ COOKIE = "wtcg_session"
 # Le pack mystère s'ouvre comme une série (`{"seriesId": "mystery"}`) mais /api/series ne le liste pas.
 MYSTERY = "mystery"
 # Le pack mystère se débloque environ toutes les 6 h : inutile d'en redemander un juste après un succès.
+# Il n'est de toute façon demandé qu'aux passages du planning (schedule.py), qui ne revient sur ce
+# site que lorsque son stock approche du plafond, soit une dizaine d'heures après un stock vidé.
 MYSTERY_COOLDOWN = 6 * 3600
+# Valeurs de WIKITCG_NET_MYSTERY qui désactivent la demande (comme HEADLESS dans la configuration).
+MYSTERY_OFF = {"0", "false", "no", "non", "off"}
 # Le JWT dure 14 jours et le site ne le renouvelle pas à chaque appel : on prévient avant la fin.
 RENEW_WITHIN_DAYS = 3
 USER_AGENT = "Mozilla/5.0 (compatible; wikitcg-bot/1.0; outil personnel)"
 MAX_RETRIES = 3
+# Plus longue attente imposée par `Retry-After` qu'on accepte de subir avant de rejouer une lecture.
+MAX_RETRY_AFTER = 60
 # Session absente ou invalide : le site répond 401 `{"error": "unauthorized"}`. Un 403 JSON est en
 # général un refus métier (pack mystère : `{"error": "mystery_not_eligible"}`), pas un cookie périmé.
 AUTH_ERRORS = {"unauthorized", "unauthenticated", "invalid_token", "session_expired"}
 # Un code d'erreur du site est un identifiant court ; tout autre texte pourrait citer des données du compte.
 SAFE_CODE = re.compile(r"[A-Za-z0-9_.-]{1,60}")
+# Fragments (casse et séparateurs ignorés) d'un refus qui n'est pas ordinaire : vérification humaine,
+# défi, limite de débit, blocage. Insister reviendrait à tester les défenses du site.
+CHECK_WORDS = ("captcha", "turnstile", "human", "verif", "challenge", "robot", "ratelimit", "toomany",
+               "throttl", "blocked", "banned", "suspicious", "abuse")
 
 
 class Refusal(SiteError):
@@ -150,6 +160,29 @@ def shown_code(code: Any) -> str:
     return code if isinstance(code, str) and SAFE_CODE.fullmatch(code) else "code d'erreur non reconnu"
 
 
+def is_check_code(code: Any) -> bool:
+    """Le code d'erreur parle-t-il de vérification humaine, de défi ou de limite de débit ?"""
+    flat = re.sub(r"[^a-z]", "", code.lower()) if isinstance(code, str) else ""
+    return any(word in flat for word in CHECK_WORDS)
+
+
+def refusal_error(where: str, code: Any) -> SiteError:
+    """Erreur pour un refus JSON du site. Un refus ordinaire (`mystery_not_eligible`, plus de pack…)
+    est une `Refusal`, que l'appelant peut tolérer ; une demande de vérification est une `SiteError`
+    simple, qui arrête le run : le bot ne tente pas de la satisfaire ni de la contourner."""
+    shown = shown_code(code)
+    if is_check_code(code):
+        return SiteError(f"{where} : {shown}. Le site demande une vérification ou limite le débit : "
+                         "le bot s'arrête et ne la contourne pas.")
+    return Refusal(f"{where} : {shown}")
+
+
+def retry_after(resp: httpx.Response) -> int | None:
+    """Attente demandée par `Retry-After`, en secondes (None si absente ou donnée sous forme de date)."""
+    value = resp.headers.get("Retry-After", "").strip()
+    return int(value) if value.isascii() and value.isdigit() else None
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -157,18 +190,35 @@ def _int(value: Any) -> int:
         return 0
 
 
-def free_stock(status: dict) -> int:
-    """Packs gratuits en réserve ; les packs achetés (`paidPacks`) ne sont jamais comptés."""
-    if "freePacks" in status:
-        return max(_int(status["freePacks"]), 0)
-    return max(_int(status.get("totalAvailable")) - _int(status.get("paidPacks")), 0)
+def _count(value: Any) -> int | None:
+    """Compteur du site (nombre JSON), ou None s'il est absent ou d'une autre forme."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return int(value)
+    except (ValueError, OverflowError):  # NaN ou infini
+        return None
+
+
+def free_stock(status: dict) -> int | None:
+    """Packs gratuits en réserve ; les packs achetés (`paidPacks`) ne sont jamais comptés.
+
+    None si le statut ne le dit pas : un statut illisible doit se voir, pas passer pour un stock vide.
+    """
+    free = _count(status.get("freePacks"))
+    if free is None:
+        total, paid = _count(status.get("totalAvailable")), _count(status.get("paidPacks"))
+        if total is None or paid is None:
+            return None
+        free = total - paid
+    return max(free, 0)
 
 
 def regen_text(next_regen_ms: Any, now: float) -> str:
     """Délai avant le prochain pack gratuit (« 1h 58m »), vide si inconnu ou déjà échu."""
     try:
         seconds = int(next_regen_ms / 1000 - now)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return ""
     if seconds <= 0:
         return ""
@@ -304,8 +354,13 @@ class WikiTcgNet:
         if not isinstance(status, dict):
             raise SiteError("Réponse inattendue de /api/packs/status.")
         free = free_stock(status)
+        if free is None:
+            # Un champ renommé ou une page de maintenance en 200 : le prendre pour « 0 pack » ferait
+            # attendre le planning des heures, et le stock (plafonné à 5) se perdrait sans bruit.
+            raise SiteError("Réponse inattendue de /api/packs/status : le stock gratuit n'y figure pas "
+                            "(ni freePacks, ni totalAvailable avec paidPacks).")
         result.packs_before = free
-        result.packs_max = status.get("maxFreePacks")
+        result.packs_max = _count(status.get("maxFreePacks"))
         now = time.time()
         notes = stock_notes(status)
 
@@ -370,6 +425,8 @@ class WikiTcgNet:
                 refusal = str(exc)
                 break
             self._record(result, res)
+            # Le client du site relit /api/packs/status après chaque ouverture : la réponse d'ouverture
+            # ne porte sans doute pas le stock, on décompte alors nous-mêmes (au pire un refus l'arrête).
             free = max(_int(res["freePacks"]) if "freePacks" in res else free - 1, 0)
         return free, refusal
 
@@ -388,7 +445,7 @@ class WikiTcgNet:
 
     def _mystery_due(self, settings: Settings) -> bool:
         """Faut-il (re)demander le pack mystère ? Non s'il est désactivé ou si le dernier est trop récent."""
-        if settings.get("WIKITCG_NET_MYSTERY") == "0":
+        if settings.get("WIKITCG_NET_MYSTERY").lower() in MYSTERY_OFF:
             return False
         try:
             not_before = float(json.loads(self._mystery_file(settings).read_text(encoding="utf-8"))["not_before"])
@@ -402,8 +459,9 @@ class WikiTcgNet:
         Hors délai, le site répond 403 `mystery_not_eligible`, ce qui est normal. Pour ne pas le
         redemander à chaque run, on attend la fin du délai après chaque succès. Rend la réponse du
         site si le pack a été ouvert. Cette demande à l'aveugle ne doit pas empêcher les packs
-        ordinaires : on tolère un refus JSON du site et une erreur serveur (la requête suivante
-        échouera aussi si c'est général). Un blocage (HTML, 4xx sans code), un 429 ou une réponse
+        ordinaires : on tolère un refus JSON ordinaire du site et une erreur serveur (la requête
+        suivante échouera aussi si c'est général). Un blocage (HTML, 4xx sans code), une demande de
+        vérification ou de ralentissement (429, `human_verification_required`…) ou une réponse
         inattendue arrête en revanche le run, au lieu d'enchaîner d'autres requêtes.
         """
         if not self._mystery_due(settings):
@@ -435,7 +493,7 @@ class WikiTcgNet:
         if opened_ok(res):
             return res
         if isinstance(res, dict) and res.get("error"):
-            raise Refusal(f"POST /api/packs/open → 200 : {shown_code(res['error'])}")
+            raise refusal_error("POST /api/packs/open → 200", res["error"])
         raise SiteError("POST /api/packs/open : réponse inattendue (le pack a peut-être été ouvert).")
 
     @staticmethod
@@ -467,17 +525,25 @@ class WikiTcgNet:
                 raise AuthError(
                     f"{method} {path} → {resp.status_code} : cookie wtcg_session refusé ou expiré."
                 )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if (method != "GET" and resp.status_code >= 500) or attempt == MAX_RETRIES:
-                    failure = ServerError if resp.status_code >= 500 else SiteError  # 429 : on ralentit, on s'arrête
-                    raise failure(f"{method} {path} → {resp.status_code} après {attempt} essai(s).")
-                wait = resp.headers.get("Retry-After", "")
-                time.sleep(min(float(wait), 60) if wait.isdigit() else 2 ** attempt)
+            wait = retry_after(resp)
+            if resp.status_code == 429:
+                # Le site demande de ralentir : on ne rejoue qu'une lecture, et seulement après la courte
+                # attente qu'il indique. Sans durée, avec une plus longue, ou pour une ouverture (dont
+                # le pack mystère facultatif), s'arrêter : le planning reviendra plus tard.
+                if method != "GET" or wait is None or wait > MAX_RETRY_AFTER or attempt == MAX_RETRIES:
+                    asked = f" (il demande {wait} s)" if wait is not None else ""
+                    raise SiteError(f"{method} {path} → 429 : le site demande de ralentir{asked}, le bot s'arrête.")
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 500:
+                if method != "GET" or attempt == MAX_RETRIES:
+                    raise ServerError(f"{method} {path} → {resp.status_code} après {attempt} essai(s).")
+                time.sleep(2 ** attempt if wait is None else min(wait, MAX_RETRY_AFTER))
                 continue
             if resp.status_code >= 400:
                 if code:
                     # Un refus métier (« mystery_not_eligible »…) n'est pas un échec de session.
-                    raise Refusal(f"{method} {path} → {resp.status_code} : {shown_code(code)}")
+                    raise refusal_error(f"{method} {path} → {resp.status_code}", code)
                 # Sans code d'erreur du site, ce n'est pas lui qui parle : on n'en recopie rien (le
                 # corps pourrait citer le compte) et on ne le prend surtout pas pour un simple refus.
                 blocked = " : accès bloqué par le site ou par Cloudflare" if resp.status_code == 403 else ""
