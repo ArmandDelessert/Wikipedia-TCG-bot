@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import schedule
 from .config import Settings, load_env_file
 from .history import record
 from .locking import AlreadyRunning, run_lock
@@ -68,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"liste séparée par des virgules ({', '.join(SITES)}) ; "
                           "par défaut : les sites dont une session est présente")
     run.add_argument("--dry-run", action="store_true", help="ne rien ouvrir")
+    run.add_argument("--force", action="store_true",
+                     help="ignore le planning (par défaut, un site n'est relancé que lorsque son stock approche du plafond)")
     status = sub.add_parser("status", help="état des sessions et des stocks, sans rien ouvrir")
     status.add_argument("--sites", default="")
     log_in = sub.add_parser("login", help="connexion manuelle dans Chrome")
@@ -87,17 +90,29 @@ def do_run(parser: argparse.ArgumentParser, args, settings: Settings) -> int:
     names = _site_names(parser, args.sites, settings)
     if not names:
         log.warning("Aucune session trouvée : placez vos exports de cookies dans %s/ "
-                    "ou lancez « login <site> ».", settings.cookies_dir)
+                    "(wikitcg.net, wikigacha.com, wiki-tcg.com) ou lancez « login <site> » (surtout WikiMasters).",
+                    settings.cookies_dir)
+        return EXIT_OK
+    # Nommer des sites ou passer --force court-circuite le planning.
+    gated = not (args.sites or args.force or settings.dry_run)
+    due = [n for n in names if not gated or schedule.is_due(settings, n)]
+    for name in names:
+        if name not in due:
+            log.info("%s : prochain passage dans %d min.", SITES[name].label,
+                     round(schedule.seconds_left(settings, name) / 60))
+    if not due:
         return EXIT_OK
     try:
         with run_lock(settings.state_dir / "run.lock"):
             results = []
-            for name in names:
+            for name in due:
                 result = run_site(name, settings)
                 record(settings, result)
+                if not settings.dry_run:
+                    schedule.record(settings, result)
                 results.append(result)
             (settings.state_dir / "last_run.json").write_text(
-                json.dumps({"at": int(time.time()), "sites": names}), encoding="utf-8")
+                json.dumps({"at": int(time.time()), "sites": due}), encoding="utf-8")
     except AlreadyRunning as exc:
         log.warning("Run ignoré : %s.", exc)
         return EXIT_BUSY
@@ -114,7 +129,13 @@ def do_status(parser: argparse.ArgumentParser, args, settings: Settings) -> int:
         print(f"- {site.label} : {state}")
     print()
     settings.dry_run = True
-    results = [run_site(name, settings) for name in names]
+    try:
+        # Les sites à profil de navigateur persistant ne supportent pas deux Chrome sur le même profil.
+        with run_lock(settings.state_dir / "run.lock"):
+            results = [run_site(name, settings) for name in names]
+    except AlreadyRunning:
+        print("Un run est en cours : réessayez dans quelques minutes.")
+        return EXIT_BUSY
     print(render_summary(results))
     return EXIT_AUTH if any(r.auth_failed for r in results) else (
         EXIT_OK if all(r.ok for r in results) else EXIT_ERROR)

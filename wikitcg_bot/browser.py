@@ -61,7 +61,9 @@ def browser_page(settings: Settings, store: SessionStore | None = None, profile:
             context = browser.new_context(**common, storage_state=storage_state)
         try:
             if store is not None:
-                cookies = store.load()
+                # cf_clearance appartient à l'IP et au navigateur qui ont passé le défi Cloudflare :
+                # le réinjecter dans un autre navigateur ne sert à rien et présenterait un jeton incohérent.
+                cookies = [c for c in store.load() if c["name"] != "cf_clearance"]
                 if profile:
                     # Le profil garde déjà ses propres cookies, éventuellement plus récents que
                     # l'état sauvegardé : on ne lui ajoute que ceux qu'il n'a pas.

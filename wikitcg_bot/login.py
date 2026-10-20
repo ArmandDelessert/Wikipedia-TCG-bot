@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from playwright.sync_api import sync_playwright
 
+from . import schedule
 from .browser import launch_options
 from .config import Settings
-from .sessions import SessionStore
+from .sites.base import session_store
 
 
 def login(settings: Settings, site) -> int:
@@ -14,7 +15,7 @@ def login(settings: Settings, site) -> int:
     if not url or not hosts:
         print(f"{site.label} : connexion manuelle non prise en charge.")
         return 2
-    store = SessionStore(settings, site.name, hosts)
+    store = session_store(settings, site)
     directory = settings.profiles_dir / site.name
     directory.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
@@ -29,5 +30,6 @@ def login(settings: Settings, site) -> int:
             store.save(cookies)
         finally:
             context.close()
+    schedule.clear(settings, site.name)  # le prochain tour repasse sur ce site sans attendre
     print(f"Session enregistrée : {store.describe()}")
     return 0

@@ -5,7 +5,7 @@ from collections import Counter
 from .models import SiteResult
 
 # Raretés connues des différents jeux, de la plus rare à la plus commune.
-RARITY_ORDER = ["LR", "L", "UR", "SSR", "SR", "R", "UC", "PC", "C"]
+RARITY_ORDER = ["FA", "P", "M", "LR", "L", "UR", "SSR", "E", "SR", "R", "UC", "PC", "C"]
 
 
 def _rank(rarity: str) -> int:
