@@ -34,9 +34,11 @@ def store_of(settings):
 
 
 def seed(settings, token=None, cf=True):
-    """Dépose une session locale : le cookie `wtcg_session` et, comme dans un vrai export, `cf_clearance`."""
+    """Dépose une session locale : `wtcg_session`, un cookie annexe et, comme dans un vrai export, `cf_clearance`
+    (que le magasin de sessions écarte : lié à l'IP et au navigateur d'origine)."""
     token = token or fresh_jwt()
-    cookies = [stored_cookie("wtcg_session", token, expires=jwt_expiry(token) or -1)]
+    cookies = [stored_cookie("wtcg_session", token, expires=jwt_expiry(token) or -1),
+               stored_cookie("theme", "sombre")]
     if cf:
         cookies.append(stored_cookie("cf_clearance", "cf-opaque", ".wikitcg.net", int(time.time()) + 300 * DAY))
     store_of(settings).save(cookies)
@@ -324,9 +326,9 @@ def test_only_the_session_cookie_is_sent_never_the_cloudflare_clearance(make_set
     api = FakeWikiTcg(free=0)
     run(settings, api)
     # cf_clearance a été délivré au Chrome du propriétaire : le rejouer depuis ce client serait
-    # emprunter un laissez-passer Cloudflare qui n'est pas le sien.
+    # emprunter un laissez-passer Cloudflare qui n'est pas le sien. Le magasin ne le garde même plus.
     assert all(h == f"wtcg_session={token}" for h in api.cookie_headers)
-    assert saved(settings, "cf_clearance")["value"] == "cf-opaque"  # mais il reste dans l'état local
+    assert saved(settings, "cf_clearance") is None
 
 
 # -- renouvellement du cookie -----------------------------------------------------------------
@@ -339,7 +341,7 @@ def test_renewed_cookie_is_persisted_and_other_cookies_are_left_alone(make_setti
     session = saved(settings, "wtcg_session")
     assert session["value"] == renewed and session["expires"] == jwt_expiry(renewed)
     assert session["domain"] == "wikitcg.net" and session["httpOnly"] and session["secure"]
-    assert saved(settings, "cf_clearance")["value"] == "cf-opaque"
+    assert saved(settings, "theme")["value"] == "sombre"  # les autres cookies restent intacts
     # Les requêtes suivantes utilisent déjà le nouveau cookie.
     assert api.cookie_headers[0].count("wtcg_session=") == 1
 
