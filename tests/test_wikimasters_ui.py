@@ -80,12 +80,14 @@ class FakeWikiMasters:
         self.suspended = False
         self.human_after = None          # exige un Turnstile après N ouvertures
         self.revoke_after = None         # la session est refusée après N ouvertures
-        self.special_enabled = True      # sinon 404, comme quand l'indicateur du site est éteint
+        self.special_enabled = True      # sinon l'API des packs spéciaux répond 404, que la page les affiche ou non
         self.special_in_ui = True        # /pulls affiche la section « Packs Spéciaux »
         self.special_available = True
         self.unsynced = False            # /pulls affiche « 0 / 10 » sans avoir lu le profil
         self.refuse_open = False         # l'ouverture est refusée par un 403 ordinaire
         self.drop_after = None           # la connexion est coupée à l'ouverture suivante, après N ouvertures
+        self.hang_after = None           # l'ouverture suivante, après N ouvertures, ne reçoit jamais de réponse
+        self.hold = threading.Event()    # libère les requêtes retenues (fin du test)
         self.special_opened = []
         self.opened = 0
         self.calls = []                  # (méthode, chemin) de chaque requête reçue
@@ -128,7 +130,7 @@ class FakeWikiMasters:
                     self._json(200, {"available": 0 if site.unsynced else site.packs, "max": 10,
                                      "next": "4:37", "suspended": site.suspended,
                                      "unsynced": site.unsynced,
-                                     "special": site.special_enabled and site.special_in_ui})
+                                     "special": site.special_in_ui})
                 elif path == "/api/packs/special":
                     self._special_state()
                 else:
@@ -183,6 +185,9 @@ class FakeWikiMasters:
                     self._json(401, {"error": "Non autorisé"})
                 elif site.drop_after is not None and site.opened >= site.drop_after:
                     self.close_connection = True  # rien n'est envoyé : fetch échoue (« Failed to fetch »)
+                elif site.hang_after is not None and site.opened >= site.hang_after:
+                    site.hold.wait(30)            # la requête reste en suspens jusqu'à la fin du test
+                    self.close_connection = True
                 elif site.refuse_open:
                     self._json(403, {"error": "Compte bloqué"})
                 elif site.api_challenge_after is not None and site.opened >= site.api_challenge_after:
@@ -226,6 +231,7 @@ def fake(monkeypatch):
     # Le faux site affiche tout d'un coup : inutile d'attendre des secondes ce qui ne viendra pas.
     monkeypatch.setattr(wikimasters, "SPECIAL_WAIT_S", 0.6)
     yield site
+    site.hold.set()
     server.shutdown()
     server.server_close()
 
@@ -288,6 +294,18 @@ def test_a_zero_stock_without_a_countdown_label_is_a_page_that_did_not_sync():
     # Le « prochain pack spécial » n'est pas le compte à rebours des paquets.
     special = "0 / 10\npaquets disponibles\nProchain pack spécial dans 5:00"
     assert not stock_synced(special, parse_stock(special))
+
+
+def test_only_a_zero_stock_needs_the_countdown_label_to_be_trusted():
+    # Le seul repli de la page est « 0 » : un stock de 1 à 9 a donc été lu, même si la formulation de
+    # « Prochain dans » change. Ne rejeter que le zéro évite de bloquer tous les runs pour un libellé.
+    reworded = "5 / 10\npaquets disponibles\nProchain paquet dans 4:37"
+    assert stock_synced(reworded, parse_stock(reworded))
+    bare = "1 / 10\npaquets disponibles"
+    assert stock_synced(bare, parse_stock(bare))
+    # Le zéro, lui, reste suspect tant que le libellé manque, quelle que soit la formulation.
+    zero = "0 / 10\npaquets disponibles\nProchain paquet dans 4:37"
+    assert not stock_synced(zero, parse_stock(zero))
 
 
 def test_special_packs_are_only_attempted_when_the_page_offers_them():
@@ -513,11 +531,24 @@ def test_dry_run_max_packs_and_a_missing_special_feature(fake, make_settings):
 
     settings.dry_run = False
     settings.max_packs = 1
-    fake.special_enabled = False  # 404 : la fonctionnalité est éteinte, ce n'est pas une erreur
     limited = site.run(settings)
     assert limited.ok and limited.opened == 1 and fake.packs == 2
     assert "Limite de 1 packs atteinte, il en reste 2" in limited.message
     assert "spécial" not in limited.message
+    assert_nothing_forbidden(fake)
+
+
+@requires_browser
+def test_a_special_api_that_answers_404_is_a_missing_feature_not_an_error(fake, make_settings):
+    # La page affiche la section (elle est donc tentée), mais l'API répond 404 : indicateur de build éteint.
+    fake.special_enabled = False
+    settings = make_settings()
+    result = site_on_fake(settings).run(settings)
+
+    assert result.ok and result.opened == 3 and fake.special_opened == []
+    assert ("GET", "/api/packs/special") in fake.calls  # le 404 a bien été essuyé
+    assert posts(fake) == ["/api/packs/open"] * 3
+    assert "spécial" not in result.message
     assert_nothing_forbidden(fake)
 
 
@@ -556,6 +587,24 @@ def test_a_network_failure_midway_keeps_the_opened_packs(fake, make_settings):
     assert result.opened == 2 and len(result.cards) == 10 and fake.packs == 3
     assert "Interrompu" in result.message and "impossible depuis la page" in result.message
     assert special_calls(fake) == []  # on ne continue pas sur un compte qui ne répond plus
+    assert_nothing_forbidden(fake)
+
+
+@requires_browser
+def test_a_request_that_never_answers_is_cut_and_keeps_the_opened_packs(fake, make_settings, monkeypatch):
+    # `page.evaluate` ignore le délai de Playwright : c'est le signal du `fetch` qui coupe l'attente.
+    monkeypatch.setattr(wikimasters, "CALL_TIMEOUT_S", 1.0)
+    fake.packs = 5
+    fake.hang_after = 2
+    settings = make_settings()
+    started = time.monotonic()
+    result = site_on_fake(settings).run(settings)  # sans coupure, ce run resterait suspendu 30 s
+
+    assert time.monotonic() - started < 25
+    assert not result.ok and not result.auth_failed
+    assert result.opened == 2 and len(result.cards) == 10
+    assert "Interrompu" in result.message and "sans réponse après 1 s" in result.message
+    assert special_calls(fake) == []
     assert_nothing_forbidden(fake)
 
 

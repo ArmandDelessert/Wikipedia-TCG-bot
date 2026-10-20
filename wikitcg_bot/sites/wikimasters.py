@@ -68,17 +68,25 @@ ALLOWED_CALLS = frozenset({
 # En-têtes par lesquels Cloudflare et Vercel annoncent qu'ils opposent un défi à la requête.
 MITIGATION_HEADERS = ("cf-mitigated", "x-vercel-mitigated")
 
+# `page.evaluate` ignore le délai par défaut de Playwright : sans ce signal, un `fetch` qui n'obtient
+# jamais de réponse bloquerait le run (et le verrou des autres sites) jusqu'à la limite de la tâche
+# planifiée, dont l'arrêt brutal ne réécrit ni les cookies renouvelés ni l'historique.
+CALL_TIMEOUT_S = 30.0
+
 # `fetch` depuis la page : même origine, cookies de session du profil, comme le fait le site.
 _CALL_JS = """
-async ({ method, path, payload, watch }) => {
-  const init = { method, credentials: 'include' };
+async ({ method, path, payload, watch, timeoutMs }) => {
+  const init = { method, credentials: 'include', signal: AbortSignal.timeout(timeoutMs) };
   if (payload != null) {
     init.headers = { 'Content-Type': 'application/json' };
     init.body = JSON.stringify(payload);
   }
   const r = await fetch(path, init);
   let body = null;
-  try { body = await r.json(); } catch (e) {}
+  try { body = await r.json(); } catch (e) {
+    // Une réponse qui n'est pas du JSON est normale (404 HTML) ; un délai dépassé en cours de lecture non.
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw e;
+  }
   const mitigated = watch.filter(n => r.headers.get(n)).map(n => n + ': ' + r.headers.get(n)).join(', ');
   return { status: r.status, url: r.url, body, mitigated };
 }
@@ -168,11 +176,13 @@ def parse_stock(text: str) -> Stock | None:
 def stock_synced(text: str, stock: Stock) -> bool:
     """Le stock affiché vient-il bien du profil ?
 
-    La page écrit « 0 / 10 » aussi quand elle n'a pas pu lire le profil (`packs_remaining ?? 0`). Un
-    stock réellement lu porte toujours « Prochain dans » dès qu'il est sous le maximum : sans ce
-    libellé, « 0 / 10 » n'est pas un stock vide mais une page qui ne s'est pas synchronisée.
+    La page écrit « 0 / 10 » aussi quand elle n'a pas pu lire le profil (`packs_remaining ?? 0`) : c'est
+    la seule valeur de repli, donc tout stock non nul a forcément été lu. Seul le zéro est suspect, et
+    un zéro réellement lu porte toujours « Prochain dans » (le libellé suit tout stock sous le
+    maximum) : sans lui, « 0 / 10 » n'est pas un stock vide mais une page qui ne s'est pas synchronisée.
+    Se limiter au zéro évite qu'un simple changement de formulation ne bloque tous les runs.
     """
-    return stock.available >= stock.maximum or bool(NEXT_LABEL.search(text))
+    return stock.available > 0 or bool(NEXT_LABEL.search(text))
 
 
 def special_offered(text: str) -> bool:
@@ -288,9 +298,12 @@ def call(page: Page, method: str, path: str, payload: dict | None = None) -> Rep
         raise ValueError(f"Appel hors périmètre : {method} {path}")
     try:
         raw = page.evaluate(_CALL_JS, {"method": method, "path": path, "payload": payload,
-                                       "watch": list(MITIGATION_HEADERS)})
+                                       "watch": list(MITIGATION_HEADERS),
+                                       "timeoutMs": int(CALL_TIMEOUT_S * 1000)})
     except PlaywrightError as exc:
-        raise SiteError(f"{method} {path} impossible depuis la page ({exc.__class__.__name__}).") from exc
+        # Le signal de `fetch` fait lever un « TimeoutError » : on le dit plutôt que le nom générique.
+        why = f"sans réponse après {CALL_TIMEOUT_S:.0f} s" if "TimeoutError" in str(exc) else exc.__class__.__name__
+        raise SiteError(f"{method} {path} impossible depuis la page ({why}).") from exc
     return as_reply(raw)
 
 
