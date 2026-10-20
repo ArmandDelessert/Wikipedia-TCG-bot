@@ -27,3 +27,5 @@ class SiteResult:
     packs_before: int | None = None
     packs_max: int | None = None
     message: str = ""
+    # La session est refusée ou a expiré : il faut se reconnecter (`login`) ou refaire un export.
+    auth_failed: bool = False

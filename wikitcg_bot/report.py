@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 from collections import Counter
-from pathlib import Path
 
 from .models import SiteResult
 
@@ -45,9 +43,3 @@ def render_summary(results: list[SiteResult]) -> str:
         lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
 
-
-def write_github_summary(markdown: str) -> None:
-    target = os.environ.get("GITHUB_STEP_SUMMARY")
-    if target:
-        with Path(target).open("a", encoding="utf-8") as fh:
-            fh.write(markdown)
