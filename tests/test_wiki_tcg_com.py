@@ -26,8 +26,11 @@ from wikitcg_bot.sites.wiki_tcg_com import (
 FUTURE = int(time.time()) + 86400 * 20
 
 
-def compte(player, statut=200):
-    return {"parts": {"compte": {"statut": statut, "corps": {"player": player}}}}
+def compte(player, statut=200, reward=None):
+    payload = {"parts": {"compte": {"statut": statut, "corps": {"player": player}}}}
+    if reward is not None:
+        payload["parts"]["connexion"] = {"statut": 200, "corps": {"connexion": {"aVoir": reward}}}
+    return payload
 
 
 # -- analyse pure ----------------------------------------------------------------------------------
@@ -159,7 +162,7 @@ def test_dry_run_reads_status_without_a_browser(real_host_session, monkeypatch):
     assert result.ok and result.opened == 0 and (result.packs_before, result.packs_max) == (4, 10)
     assert "Simulation" in result.message and "5 booster" in result.message and "1 spécial" in result.message
     request = seen[0]
-    assert request.url.path == "/api/v1/battement" and request.url.params["parts"] == "compte"
+    assert request.url.path == "/api/v1/battement" and request.url.params["parts"] == "compte,connexion"
     assert request.headers["cookie"] == "wikitcg_session=token-test"
 
 
@@ -245,7 +248,7 @@ def fake_open_all(monkeypatch, opened):
     monkeypatch.setattr(wiki_tcg_com, "browser_page", fake_browser)
     monkeypatch.setattr(wiki_tcg_com, "time", types.SimpleNamespace(sleep=lambda s: None, time=time.time))
     monkeypatch.setattr(WikiTcgCom, "_open_all",
-                        lambda self, page, settings, result: setattr(result, "opened", opened))
+                        lambda self, page, settings, result, status: setattr(result, "opened", opened))
 
 
 def run_with_final_stock(settings, before, after):
@@ -585,3 +588,25 @@ def test_challenge_page_stops_without_any_bypass(fake_site):
     with pytest.raises(SiteError, match="anti-bot") as info:
         WikiTcgCom().run(fake_site.settings)
     assert not isinstance(info.value, AuthError) and fake_site.opened == []
+
+
+# -- récompense de connexion ---------------------------------------------------------------------
+def test_parse_status_reads_the_login_reward_flag():
+    assert parse_status(compte({"packsStored": 0}, reward=True)).reward is True
+    assert parse_status(compte({"packsStored": 0}, reward=False)).reward is False
+    assert parse_status(compte({"packsStored": 0})).reward is False  # partie absente : pas de réclamation
+
+
+def test_a_waiting_reward_launches_the_browser_even_with_an_empty_stock(real_host_session, monkeypatch):
+    fake_open_all(monkeypatch, opened=0)
+    handler, _ = api({"packsStored": 0}), None
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=compte({"packsStored": 0}, reward=True)))
+    result = WikiTcgCom(transport=transport).run(real_host_session)
+    assert result.ok and result.opened == 0 and "Aucun booster disponible" not in result.message
+
+
+def test_no_reward_and_no_stock_stays_browserless(real_host_session, monkeypatch):
+    no_browser(monkeypatch)
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=compte({"packsStored": 0}, reward=False)))
+    result = WikiTcgCom(transport=transport).run(real_host_session)
+    assert result.ok and "Aucun booster disponible" in result.message

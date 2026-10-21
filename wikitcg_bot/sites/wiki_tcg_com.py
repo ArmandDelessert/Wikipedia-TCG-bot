@@ -37,16 +37,17 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://wiki-tcg.com"
 BOOSTERS_PATH = "/fr/boosters"
-STATUS_PATH = "/api/v1/battement?parts=compte"
+STATUS_PATH = "/api/v1/battement?parts=compte,connexion"
 SESSION_COOKIE = "wikitcg_session"
 PACK_MAX = 10  # plafond de la réserve
 USER_AGENT = "Wikipedia-TCG-bot (client personnel)"
 MAX_RETRIES = 3
 
 # La fenêtre « Récompense de connexion » recouvre la page tant qu'on n'a pas cliqué sur « Récupérer »
-# (aussi déclenché par Échap ou un clic à côté : tous appellent `POST /api/v1/connexion`). Le bot n'a
-# pas l'autorisation de la réclamer ; il clique donc par évènement DOM (`dispatch_event`), qui atteint
-# le bouton même sous la fenêtre, et ne touche jamais au clavier.
+# (`POST /api/v1/connexion`). Le propriétaire a autorisé la réclamation : le bot la récupère, une fois par
+# jour, quand l'état annonce `connexion.aVoir`. Les clics se font par évènement DOM (`dispatch_event`),
+# jamais au clavier (Échap ou un clic à côté déclencheraient aussi la réclamation).
+_REWARD_BUTTON = ".cnx__bouton"
 
 _SACHET = "button.sachet[aria-label='Ouvrir']"
 _SPECIAUX = ".speciaux button.special"
@@ -93,6 +94,7 @@ class Status:
     packs: int
     dust: int = 0
     speciaux: dict[str, int] = field(default_factory=dict)
+    reward: bool = False  # « Récompense de connexion » du jour à récupérer
 
     @property
     def total(self) -> int:
@@ -135,7 +137,16 @@ def parse_status(payload: Any) -> Status:
     if not isinstance(packs, int) or isinstance(packs, bool):
         raise SiteError("Réponse de l'état du compte sans `packsStored`.")
     dust = player.get("dust")
-    return Status(packs, dust if isinstance(dust, int) else 0, parse_speciaux(player.get("speciaux")))
+    return Status(packs, dust if isinstance(dust, int) else 0, parse_speciaux(player.get("speciaux")),
+                  reward=_reward_waiting(payload))
+
+
+def _reward_waiting(payload: Any) -> bool:
+    """`parts.connexion.corps.connexion.aVoir` ; tout autre cas (partie absente, en erreur) vaut non."""
+    try:
+        return payload["parts"]["connexion"]["corps"]["connexion"]["aVoir"] is True
+    except (KeyError, TypeError):
+        return False
 
 
 def parse_cards(raw: list[dict]) -> list[Card]:
@@ -231,14 +242,14 @@ class WikiTcgCom:
         if settings.dry_run:
             result.message = f"Simulation : rien n'a été ouvert ({status.total} booster(s) disponible(s){extra})."
             return result
-        if status.total == 0:
+        if status.total == 0 and not status.reward:
             result.message = "Aucun booster disponible (un nouveau toutes les 15 minutes)."
             return result
 
         session_before = store.value(SESSION_COOKIE)
         try:
             with browser_page(settings, store=store) as page:
-                self._open_all(page, settings, result)
+                self._open_all(page, settings, result, status)
         except PlaywrightError as exc:
             self._interrupted(result, SiteError(f"Navigateur : {(str(exc).splitlines() or ['erreur'])[0]}"))
         except SiteError as exc:
@@ -320,13 +331,16 @@ class WikiTcgCom:
             raise SiteError("Réponse de l'état du compte illisible (JSON attendu).") from exc
 
     # -- ouverture (navigateur) -------------------------------------------------------------------
-    def _open_all(self, page: Page, settings: Settings, result: SiteResult) -> None:
+    def _open_all(self, page: Page, settings: Settings, result: SiteResult, status: Status) -> None:
         self._goto_boosters(page)
+        claimed = status.reward and self._claim_login_reward(page)
+        if claimed:
+            result.message = "Récompense de connexion récupérée."
         specials = 0
         while result.opened < settings.max_packs:
             sorte = self._prepare(page)
             if sorte is None:
-                if not result.opened:  # l'API annonçait des boosters : « rien à ouvrir » serait un faux succès
+                if not result.opened and status.total and not claimed:  # l'API annonçait des boosters : « rien à ouvrir » serait un faux succès
                     raise SiteError("Aucun sachet ouvrable alors que l'API annonce des boosters "
                                     "(stock vidé entre-temps, ou le site a-t-il changé ?).")
                 break
@@ -339,6 +353,22 @@ class WikiTcgCom:
             self._again(page)
         if specials:
             log.info("%d booster(s) spécial(aux) ouvert(s).", specials)
+
+    @staticmethod
+    def _claim_login_reward(page: Page) -> bool:
+        """Clique sur « Récupérer » dans la fenêtre de récompense de connexion. Faux si elle n'apparaît pas."""
+        try:
+            page.wait_for_selector(_REWARD_BUTTON, timeout=8_000)
+        except PlaywrightError:
+            log.info("Récompense de connexion annoncée mais fenêtre absente (déjà récupérée ailleurs ?).")
+            return False
+        page.locator(_REWARD_BUTTON).dispatch_event("click")
+        try:
+            page.wait_for_selector(_REWARD_BUTTON, state="detached", timeout=10_000)
+        except PlaywrightError as exc:
+            raise SiteError("La récompense de connexion ne s'est pas fermée après « Récupérer ».") from exc
+        log.info("Récompense de connexion récupérée.")
+        return True
 
     @staticmethod
     def _goto_boosters(page: Page) -> None:
