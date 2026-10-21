@@ -16,8 +16,7 @@ from wikitcg_bot.sites.wikitcg_net import (
 )
 
 DAY = 86400
-FORBIDDEN_PATHS = ("/api/packs/regen", "/api/payments", "/api/shop", "/api/marketplace",
-                   "/api/packs/open-completion", "/api/cards/recycle")
+FORBIDDEN_PATHS = ("/api/packs/regen", "/api/payments", "/api/shop", "/api/marketplace", "/api/cards/recycle")
 
 
 def fresh_jwt(days=10):
@@ -97,6 +96,12 @@ class FakeWikiTcg:
         if path == "/api/collection":
             return httpx.Response(200, json=[{"series_id": "s1", "owned": 20, "total_pulls": 20},
                                              {"series_id": "s2", "owned": 5, "total_pulls": 6}])
+        if path == "/api/packs/open-completion":
+            pending = [c for c in self.completion if (c.get("id") if isinstance(c, dict) else c) == body.get("completionPackId")]
+            if not pending:
+                return httpx.Response(404, json={"error": "completion_pack_not_found"})
+            self.completion.remove(pending[0])
+            return httpx.Response(200, json={"cards": [{"id": "k1", "rarity": "R", "article": {"title": "Louvre"}}]})
         if path == "/api/packs/open":
             if body["seriesId"] == "mystery":
                 if self.mystery:
@@ -548,13 +553,37 @@ def test_paid_packs_are_left_alone_and_reported(make_settings):
     assert result.packs_before == 0 and "2 pack(s) acquis non ouvert(s)" in result.message
 
 
-def test_completion_packs_are_reported_not_opened(make_settings):
+def test_completion_packs_are_opened_as_authorized_by_the_owner(make_settings):
     settings = make_settings()
     seed(settings)
-    api = FakeWikiTcg(free=0, completion=[{"id": "cp1", "seriesId": "s1"}])
+    api = FakeWikiTcg(free=0, completion=[{"id": "cp1", "seriesId": "s1"}, "cp2"])
     result = run(settings, api)
-    assert "1 pack(s) de complétion à ouvrir à la main" in result.message
-    assert not any(p.startswith("/api/packs/open-completion") for p in api.paths())
+    assert result.ok and result.opened == 2 and [c.title for c in result.cards] == ["Louvre", "Louvre"]
+    assert api.completion == []
+    posted = [b for m, path, b in api.requests if path == "/api/packs/open-completion"]
+    assert posted == [{"completionPackId": "cp1"}, {"completionPackId": "cp2"}]
+
+
+def test_a_refused_completion_pack_does_not_stop_the_free_packs(make_settings):
+    settings = make_settings()
+    seed(settings)
+    api = FakeWikiTcg(free=1, completion=[{"id": "fantome"}])
+    api.completion = [{"id": "fantome"}]
+    original = api.__call__
+
+    def refuse(request, body):
+        if request.url.path == "/api/packs/open-completion":
+            return httpx.Response(403, json={"error": "completion_not_ready"})
+    api.override = refuse
+    result = run(settings, api)
+    assert result.ok and result.opened == 1 and api.opened == ["s2"]
+
+
+def test_completion_ids_accepts_ids_or_objects_and_ignores_the_rest():
+    from wikitcg_bot.sites.wikitcg_net import completion_ids
+    status = {"completionPacks": ["a", {"id": "b"}, {"completionPackId": 7}, {"x": 1}, None, True, ""]}
+    assert completion_ids(status) == ["a", "b", "7"]
+    assert completion_ids({}) == [] and completion_ids({"completionPacks": "oops"}) == []
 
 
 def test_the_bot_never_calls_a_spending_endpoint(make_settings):
@@ -562,7 +591,8 @@ def test_the_bot_never_calls_a_spending_endpoint(make_settings):
     seed(settings)
     api = FakeWikiTcg(free=2, paid=1, completion=[{"id": "cp1"}], mystery=None)
     run(settings, api)
-    assert set(api.paths()) <= {"/api/packs/status", "/api/series", "/api/collection", "/api/packs/open"}
+    assert set(api.paths()) <= {"/api/packs/status", "/api/series", "/api/collection", "/api/packs/open",
+                               "/api/packs/open-completion"}
     assert not [p for p in api.paths() if p.startswith(FORBIDDEN_PATHS)]
 
 

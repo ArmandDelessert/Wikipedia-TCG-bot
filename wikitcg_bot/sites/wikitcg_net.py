@@ -231,10 +231,21 @@ def stock_notes(status: dict) -> list[str]:
     notes = []
     if _int(status.get("paidPacks")) > 0:
         notes.append(f"{_int(status['paidPacks'])} pack(s) acquis non ouvert(s) (le bot n'ouvre que les gratuits)")
-    waiting = status.get("completionPacks")
-    if isinstance(waiting, list) and waiting:
-        notes.append(f"{len(waiting)} pack(s) de complétion à ouvrir à la main")
     return notes
+
+
+def completion_ids(status: dict) -> list[str]:
+    """Identifiants des packs de complétion (récompenses de série complète) en attente.
+
+    Forme non observée (la liste a toujours été vide) : une entrée est soit l'identifiant lui-même, soit un
+    objet portant `id` ou `completionPackId`. Tout le reste est ignoré."""
+    waiting = status.get("completionPacks")
+    ids: list[str] = []
+    for entry in waiting if isinstance(waiting, list) else []:
+        raw = entry.get("completionPackId", entry.get("id")) if isinstance(entry, dict) else entry
+        if isinstance(raw, (str, int)) and not isinstance(raw, bool) and str(raw):
+            ids.append(str(raw))
+    return ids
 
 
 def _as_list(data: Any, key: str) -> list[dict]:
@@ -370,6 +381,8 @@ class WikiTcgNet:
                 parts.append(f"Prochain pack gratuit dans {wait}.")
             if self._mystery_due(settings):
                 parts.append("Pack mystère à tenter.")
+            if ids := completion_ids(status):
+                parts.append(f"{len(ids)} pack(s) de complétion à ouvrir.")
             result.message = " ".join(parts + notes)
             return
 
@@ -377,6 +390,7 @@ class WikiTcgNet:
             mystery = self._try_mystery(client, settings, result)
             if mystery and "freePacks" in mystery:
                 free = max(_int(mystery["freePacks"]), 0)  # au cas où le mystère entamerait le stock
+            self._open_completion_packs(client, settings, result, completion_ids(status))
             free, refusal = self._open_free_packs(client, settings, result, free)
         except Exception as exc:  # noqa: BLE001 — quelle que soit la cause, l'historique prime
             if not result.opened:
@@ -401,6 +415,25 @@ class WikiTcgNet:
             wait = regen_text(status.get("nextRegenAt"), now)
             message = "Aucun pack gratuit disponible" + (f" (prochain dans {wait})." if wait else ".")
         result.message = " ".join([message, *(f"{note}." for note in notes)])
+
+    def _open_completion_packs(self, client: httpx.Client, settings: Settings, result: SiteResult,
+                               ids: list[str]) -> None:
+        """Ouvre les packs de complétion (récompenses de série complète, gratuites ; le propriétaire a autorisé
+        leur réclamation). Un refus est signalé sans arrêter le run."""
+        for pack_id in ids:
+            if result.opened >= settings.max_packs:
+                return
+            if result.opened:
+                pause(settings)
+            try:
+                res = self._request(client, "POST", "/api/packs/open-completion", json={"completionPackId": pack_id})
+            except Refusal as exc:
+                log.warning("%s : pack de complétion refusé : %s", self.label, exc)
+                continue
+            if not opened_ok(res):
+                raise SiteError("POST /api/packs/open-completion : réponse inattendue (le pack a peut-être été ouvert).")
+            self._record(result, res)
+            log.info("%s : pack de complétion ouvert.", self.label)
 
     def _open_free_packs(self, client: httpx.Client, settings: Settings, result: SiteResult,
                          free: int) -> tuple[int, str]:
