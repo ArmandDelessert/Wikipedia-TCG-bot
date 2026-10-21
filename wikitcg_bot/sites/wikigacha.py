@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,12 +55,13 @@ SYNC_WAIT_S = 90  # attente de la synchronisation après les ouvertures
 SYNC_POLL_MS = 5000  # relevé de la base locale (gratuit : aucune requête réseau)
 GATE_WAIT_S = 75  # attente de la convergence local/cloud avant d'ouvrir
 GATE_POLL_MS = 5000
+NO_REACTION_S = 45  # le site est parfois lent à répondre (campagne, affluence) : ne pas conclure trop vite
 # Le résumé du cloud n'est relu qu'à ce rythme au plus (« pas de martèlement ») ; seule la base locale du
 # navigateur est interrogée plus souvent. Les relevés obligatoires (début, fin) ne sont pas concernés.
 CLOUD_READ_GAP_S = 60
 OVERLAY_PATIENCE_S = 4.0  # le bandeau de consentement et les annonces arrivent en différé
 SETTLE_MS = 1500  # laisse l'interface adopter l'état importé du cloud avant de lire le stock
-FETCH_TIMEOUT_MS = 20_000  # un serveur qui ne répond pas ne doit pas figer le run jusqu'au délai du planificateur
+FETCH_TIMEOUT_MS = 60_000  # l'API du site est parfois très lente
 LOCAL_TIMEOUT_MS = 15_000
 RESULTS_WAIT_S = 60  # temps laissé à l'écran des résultats pour apparaître après le toucher du pack
 BACK_CLICK_TIMEOUT_MS = 15_000
@@ -524,7 +526,7 @@ def _open_one(page: Page, seen: list[Response]) -> list[Card] | None:
         waited = time.monotonic() - started
         if skip.count() and skip.first.is_visible():
             skip.first.click()
-        if not seen and waited > 15:
+        if not seen and waited > NO_REACTION_S:
             text = _body_text(page)
             if no_packs_left(text) or (parse_stock(text) or (1, 0))[0] == 0:
                 return None
@@ -563,6 +565,10 @@ def _wait_for_sync(page: Page, before: Collection, drawn: int) -> tuple[str, Col
         page.wait_for_timeout(SYNC_POLL_MS)
 
 
+class StaleProfile(Exception):
+    """La base locale du profil est en retard sur le cloud, sans rien en attente d'envoi."""
+
+
 class WikiGacha:
     name = "wikigacha"
     label = "Wikipedia Gacha"
@@ -576,6 +582,20 @@ class WikiGacha:
         return session_store(settings, self).describe((SESSION_COOKIE,))
 
     def run(self, settings: Settings) -> SiteResult:
+        try:
+            return self._run(settings)
+        except StaleProfile as stale:
+            # Des packs ont été ouverts ailleurs (votre navigateur) : le cloud a de l'avance et l'application
+            # ne rattrape pas ce retard seule. Sans aucun changement local en attente, le profil ne contient
+            # rien d'irremplaçable : un profil neuf importe le cloud (et ne pousse jamais une base vide).
+            directory = (settings.profiles_dir / PROFILE).resolve()
+            if directory.parent != settings.profiles_dir.resolve():
+                raise SiteError("Chemin de profil inattendu : suppression refusée.") from stale
+            log.warning("Profil Wikipedia Gacha en retard sur le cloud (%s) : recréation du profil.", stale)
+            shutil.rmtree(directory)
+            return self._run(settings, allow_reset=False)
+
+    def _run(self, settings: Settings, allow_reset: bool = True) -> SiteResult:
         result = SiteResult(self.name, self.label)
         store = session_store(settings, self)
         with browser_page(settings, store=store, profile=PROFILE) as page:
@@ -603,6 +623,9 @@ class WikiGacha:
                 when = f" (prochain dans {wait // 60}:{wait % 60:02d})" if wait is not None else ""
                 result.message = f"Plus de pack{when} ; la recharge par publicité proposée par le site est ignorée."
             elif blocked:
+                if (allow_reset and blocked.startswith("collection locale incomplète")
+                        and _local_collection(page)[1] == 0):
+                    raise StaleProfile(blocked)
                 raise SiteError(f"Ouverture refusée pour protéger la collection : {blocked}.")
             else:
                 self._open_packs(page, settings, result, cloud)

@@ -24,7 +24,8 @@ MAX_WAIT = 12 * 3600.0
 # wikitcg.net : une simple requête HTTP, et un pack mystère à la cadence encore inconnue (~6 h ?) qu'un
 # stock vidé ne reflète pas : on ne s'éloigne pas de plus de 3 h.
 MAX_WAIT_BY_SITE = {"wikitcg_net": 3 * 3600.0}
-RETRY_AFTER_FAILURE = 30 * 60.0  # session expirée ou erreur : inutile d'insister chaque 10 minutes
+RETRY_AFTER_FAILURE = 10 * 60.0  # erreur passagère : au tour suivant (un site rapide perdrait des packs)
+RETRY_AFTER_AUTH_FAILURE = 30 * 60.0  # session expirée : inutile d'insister, il faut une action humaine
 
 
 def _path(settings: Settings):
@@ -50,7 +51,7 @@ def _save(settings: Settings, due: dict[str, float]) -> None:
 def due_in(result: SiteResult) -> float | None:
     """Secondes avant de revenir, ou None si on ne sait pas (le site sera alors relancé à chaque tour)."""
     if not result.ok:
-        return RETRY_AFTER_FAILURE
+        return RETRY_AFTER_AUTH_FAILURE if result.auth_failed else RETRY_AFTER_FAILURE
     maximum = result.packs_max or DEFAULT_MAX.get(result.site)
     period = PERIOD_S.get(result.site)
     if result.packs_before is None or not maximum or not period:

@@ -511,3 +511,24 @@ def test_the_cloud_summary_is_not_polled_between_openings(fake_site, make_settin
     result = WikiGacha().run(make_settings())
     assert result.ok and result.opened == 3
     assert fake_site.light_reads == 2  # une lecture au départ, une autre une fois la file de synchronisation vidée
+
+
+def test_a_stale_profile_is_recreated_once_and_only_inside_the_profiles_dir(make_settings, monkeypatch):
+    from wikitcg_bot.models import SiteResult
+    from wikitcg_bot.sites import wikigacha as module
+    settings = make_settings()
+    profile = settings.profiles_dir / module.PROFILE
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Default" / "donnees").write_text("x")
+    calls = []
+
+    def fake_run(self, settings, allow_reset=True):
+        calls.append(allow_reset)
+        if allow_reset:
+            raise module.StaleProfile("collection locale incomplète")
+        assert not profile.exists()  # recréé à neuf avant la seconde tentative
+        return SiteResult("wikigacha", "Wikipedia Gacha", opened=3)
+
+    monkeypatch.setattr(module.WikiGacha, "_run", fake_run)
+    result = module.WikiGacha().run(settings)
+    assert calls == [True, False] and result.opened == 3

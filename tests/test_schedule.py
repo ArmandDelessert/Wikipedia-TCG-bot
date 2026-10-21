@@ -40,7 +40,10 @@ def test_run_stopped_by_the_cap_comes_back_quickly():
 
 
 def test_failure_backs_off_and_unknown_stock_is_not_gated():
-    assert schedule.due_in(result("wikigacha", 5, ok=False)) == schedule.RETRY_AFTER_FAILURE
+    assert schedule.due_in(result("wikigacha", 5, ok=False)) == schedule.RETRY_AFTER_FAILURE == 600
+    expired = result("wikimasters", 5, ok=False)
+    expired.auth_failed = True
+    assert schedule.due_in(expired) == schedule.RETRY_AFTER_AUTH_FAILURE
     assert schedule.due_in(result("wikigacha", None)) is None
     assert schedule.due_in(result("inconnu", 3)) is None
 
