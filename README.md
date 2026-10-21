@@ -23,7 +23,7 @@ Autre avantage : aucun secret chez GitHub, le dépôt peut rester public.
 | [wikitcg.net](https://wikitcg.net/) | cookie `wtcg_session` (14 jours) | API HTTP, sans navigateur | oui : 1 pack gratuit, 5 cartes lues |
 | [wiki-tcg.com](https://wiki-tcg.com/) | cookie `wikitcg_session` (30 jours) | état par API, ouverture par Chrome | oui : 5 boosters, état avant/après recoupé |
 | [Wikipedia Gacha](https://wikigacha.com/) | cookie NextAuth (30 jours glissants) | Chrome, profil persistant, FR | oui : 6 packs, cloud 1279 → 1309 cartes, aucune baisse |
-| [WikiMasters](https://www.wiki-masters.com/) | profil Chrome dédié (`login`) | `POST /api/packs/open` depuis la page | **non** : il faut d'abord vous connecter une fois |
+| [WikiMasters](https://www.wiki-masters.com/) | profil Chrome dédié (`login`) | `POST /api/packs/open` depuis la page | oui : 4 packs, vérifié après `login wikimasters` |
 
 Rythmes de recharge : Wikipedia Gacha 1 pack par minute (plafond 10), WikiMasters 1 par 10 min
 (plafond 10), wiki-tcg.com 1 par 15 min (plafond 10), wikitcg.net 1 pack gratuit toutes les ~2 h 40
@@ -102,9 +102,12 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
 
 ## Limites connues
 
-- Le bot ne réclame aucune récompense, faute d'autorisation explicite : « récompense de connexion » de
-  wiki-tcg.com, packs de complétion de wikitcg.net, missions de Wikipedia Gacha (celles-ci créditent
-  pourtant +2 packs d'elles-mêmes pendant l'ouverture). Les autres vous attendent à votre prochaine visite.
+- Récompenses (autorisées par le propriétaire) : le bot récupère la « récompense de connexion » de wiki-tcg.com
+  et ouvre les packs de complétion de wikitcg.net ; les missions de Wikipedia Gacha « 5 packs », « SR+ » et
+  « Wikipedia » sont créditées par le site pendant l'ouverture. Ces deux réclamations n'ont été vérifiées que
+  contre de faux sites (rien à réclamer le jour du test) ; la forme des packs de complétion est supposée.
+- Le bot ne réclame **pas** les missions « partager le résultat » (publication sur un réseau social) ni
+  « regarder une publicité » : il ne publie rien et ne simule aucune publicité.
 - Le pack mystère de wikitcg.net est demandé « à l'aveugle » (cadence inconnue, ~6 h supposées) ; les refus
   sont sans effet. `WIKITCG_NET_MYSTERY=0` désactive la demande.
 - Les packs spéciaux de WikiMasters et de wiki-tcg.com ne sont pas vérifiés en réel.
