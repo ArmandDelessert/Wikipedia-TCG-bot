@@ -65,6 +65,20 @@ l'export), 3 un autre run est en cours, 64 arguments invalides.
 Réglages facultatifs : copiez `.env.example` en `.env` (nombre maximal de packs par run, navigateur,
 fenêtre visible avec `HEADLESS=0`, série de wikitcg.net, pack mystère…).
 
+## Suivre ce que fait le bot
+
+Chaque passage écrit dans `.state/logs/bot.log` : début par site, stock lu, chaque pack ouvert avec ses
+raretés, durée, et la raison précise d'un arrêt. Pour le suivre en direct :
+
+```powershell
+Get-Content .state\logs\bot.log -Wait -Tail 30
+```
+
+Lancé à la main, `run` affiche les mêmes lignes dans le terminal. Ctrl+C l'interrompt proprement
+(Chrome refermé, cookies conservés, verrou libéré, code de sortie 130). La tâche planifiée utilise
+`pythonw.exe` et n'ouvre aucune fenêtre ; après une mise à jour de ce dépôt, relancez
+`.\scripts\install_task.ps1` pour qu'elle en profite.
+
 ## Où vont les données
 
 Tout ce qui est sensible reste sur votre disque, dans des dossiers ignorés par Git :

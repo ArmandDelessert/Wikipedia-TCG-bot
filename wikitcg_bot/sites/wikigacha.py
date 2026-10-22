@@ -516,7 +516,7 @@ def _open_one(page: Page, seen: list[Response]) -> list[Card] | None:
     seen.clear()
     _dismiss_overlays(page, patience_s=0)  # une fenêtre tardive (consentement, annonce) cacherait le pack
     try:
-        page.locator("#gacha-pack-container").click()
+        page.locator("#gacha-pack-container").click(timeout=NO_REACTION_S * 1000)
     except PlaywrightError as exc:
         raise SiteError("Impossible de toucher le pack (une fenêtre le recouvre ?).") from exc
     back = page.get_by_role("button", name=BACK)
