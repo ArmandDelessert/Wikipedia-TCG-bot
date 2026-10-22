@@ -320,8 +320,7 @@ def _check(reply: Reply, session: bool = True) -> None:
 
 
 def _record(result: SiteResult, reply: Reply) -> None:
-    result.opened += 1
-    result.cards.extend(parse_card(c) for c in reply.cards)
+    result.add_pack([parse_card(c) for c in reply.cards])
 
 
 def open_regular(page: Page, settings: Settings, result: SiteResult, stock: Stock) -> None:
@@ -442,6 +441,7 @@ class WikiMasters:
         with browser_page(settings, store=store, profile=PROFILE) as page:
             text, stock = enter_pulls(page)
             result.packs_before, result.packs_max = stock.available, stock.maximum
+            log.info("%s : %s/%s paquet(s) disponible(s).", self.label, stock.available, stock.maximum)
             if SUSPENDED.search(text):
                 result.ok = False
                 result.message = "Compte suspendu : le site bloque les ouvertures de packs."

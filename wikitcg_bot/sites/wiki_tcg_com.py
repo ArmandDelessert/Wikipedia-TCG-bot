@@ -238,6 +238,9 @@ class WikiTcgCom:
         result = SiteResult(self.name, self.label, packs_max=PACK_MAX)
         status = self._status(store)
         result.packs_before = status.packs
+        log.info("%s : %d booster(s) en réserve%s%s.", self.label, status.packs,
+                 f", dont {sum(status.speciaux.values())} spécial(aux)" if status.speciaux else "",
+                 ", récompense de connexion à récupérer" if status.reward else "")
         extra = f", dont {sum(status.speciaux.values())} spécial(aux)" if status.speciaux else ""
         if settings.dry_run:
             result.message = f"Simulation : rien n'a été ouvert ({status.total} booster(s) disponible(s){extra})."
@@ -344,8 +347,7 @@ class WikiTcgCom:
                     raise SiteError("Aucun sachet ouvrable alors que l'API annonce des boosters "
                                     "(stock vidé entre-temps, ou le site a-t-il changé ?).")
                 break
-            result.cards.extend(self._open_one(page))
-            result.opened += 1
+            result.add_pack(self._open_one(page))
             specials += bool(sorte)
             if result.opened >= settings.max_packs or not self._can_continue(page):
                 break

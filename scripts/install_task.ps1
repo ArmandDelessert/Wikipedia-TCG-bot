@@ -4,7 +4,7 @@
 #   .\scripts\install_task.ps1 -EveryMinutes 5
 #   .\scripts\install_task.ps1 -Uninstall
 #
-# La tâche tourne sous votre compte, uniquement quand vous êtes connecté, sans fenêtre visible.
+# La tâche tourne sous votre compte, uniquement quand vous êtes connecté, sans aucune fenêtre (pythonw).
 # Si l'ordinateur était éteint à l'heure prévue, elle se lance dès que possible ensuite.
 # Le bot décide seul quels sites relancer (Wikipedia Gacha se recharge d'un pack par minute, les autres bien
 # plus lentement) : un passage toutes les 10 minutes suffit à ne rien perdre, sans lancer Chrome pour rien.
@@ -22,9 +22,12 @@ if ($Uninstall) {
     return
 }
 
-$script = Join-Path $PSScriptRoot "run_bot.ps1"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
+# pythonw.exe : l'interpréteur sans console, donc aucune fenêtre ne s'ouvre (powershell -WindowStyle Hidden
+# en laisse apparaître une une seconde). Les messages vont dans le journal du bot (.state, dossier logs).
+$root = Split-Path -Parent $PSScriptRoot
+$pythonw = Join-Path $root ".venv\Scripts\pythonw.exe"
+if (-not (Test-Path $pythonw)) { throw "Environnement introuvable : $pythonw (voir le README)." }
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m wikitcg_bot run" -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes)
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `

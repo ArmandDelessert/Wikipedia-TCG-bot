@@ -127,3 +127,30 @@ def test_one_line_collapses_and_truncates():
     assert cli.one_line("première\ndeuxième") == "première"
     assert cli.one_line("x" * 500).endswith("…") and len(cli.one_line("x" * 500)) == 160
     assert cli.one_line("") == ""
+
+
+def test_ctrl_c_exits_130_and_releases_the_lock(env, monkeypatch, caplog):
+    site, = use_sites(monkeypatch, FakeSite("wikigacha", error=KeyboardInterrupt()))
+    with caplog.at_level("INFO", logger="wikitcg_bot"):
+        assert cli.main(["run", "--force"]) == cli.EXIT_INTERRUPTED == 130
+    assert not (env / "state" / "run.lock").exists()
+    assert any("Interrompu (Ctrl+C)" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unexpected_crash_is_logged_with_its_traceback_and_exits_1(env, monkeypatch, caplog):
+    use_sites(monkeypatch, FakeSite("wikigacha", result=opened("wikigacha")))
+
+    def boom(*args):
+        raise RuntimeError("panne imprévue")
+    monkeypatch.setattr(cli, "do_run", boom)
+    assert cli.main(["run"]) == cli.EXIT_ERROR
+    critical = [r for r in caplog.records if r.levelname == "CRITICAL"]
+    assert critical and critical[0].exc_info
+
+
+def test_history_write_failure_does_not_lose_the_other_sites(env, monkeypatch):
+    a, b = use_sites(monkeypatch, FakeSite("wikigacha", result=opened("wikigacha")),
+                     FakeSite("wiki_tcg_com", result=opened("wiki_tcg_com")))
+    monkeypatch.setattr(cli, "record", lambda settings, result: (_ for _ in ()).throw(OSError("disque plein")))
+    assert cli.main(["run", "--force"]) == cli.EXIT_OK
+    assert a.calls == b.calls == 1

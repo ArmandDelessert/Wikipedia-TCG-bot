@@ -371,6 +371,7 @@ class WikiTcgNet:
             raise SiteError("Réponse inattendue de /api/packs/status : le stock gratuit n'y figure pas "
                             "(ni freePacks, ni totalAvailable avec paidPacks).")
         result.packs_before = free
+        log.info("%s : %d pack(s) gratuit(s) prêt(s) sur %s.", self.label, free, _count(status.get("maxFreePacks")) or "?")
         result.packs_max = _count(status.get("maxFreePacks"))
         now = time.time()
         notes = stock_notes(status)
@@ -531,8 +532,7 @@ class WikiTcgNet:
 
     @staticmethod
     def _record(result: SiteResult, res: dict) -> None:
-        result.opened += 1
-        result.cards.extend(parse_cards(res))
+        result.add_pack(parse_cards(res))
 
     # -- HTTP ---------------------------------------------------------------
     def _request(self, client: httpx.Client, method: str, path: str, **kwargs: Any) -> Any:

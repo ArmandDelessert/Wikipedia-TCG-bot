@@ -613,6 +613,9 @@ class WikiGacha:
             text = _body_text(page)
             stock = parse_stock(text)
             result.packs_before = stock[0] if stock else 0
+            log.info("%s : stock %s/%s ; collection locale identique au cloud : %s (cloud : %s).",
+                     self.label, result.packs_before, stock[1] if stock else "?",
+                     "oui" if blocked is None else f"non ({blocked})", cloud)
             result.packs_max = stock[1] if stock else STOCK_CAP
 
             if settings.dry_run:
@@ -644,8 +647,7 @@ class WikiGacha:
                 if cards is None:
                     stock, touched = 0, False
                     break
-                result.opened += 1
-                result.cards.extend(cards)
+                result.add_pack(cards)
                 drawn += len(cards)
                 touched = False
                 # Une baisse du cloud, même passagère, arrête tout sur-le-champ (relevé espacé, voir CLOUD_READ_GAP_S).
@@ -665,8 +667,7 @@ class WikiGacha:
             result.auth_failed = isinstance(cause, AuthError)
             late = _drawn_cards(seen) if touched else []
             if late:  # la réponse de /api/gacha est arrivée avant l'échec : le pack est bien consommé
-                result.opened += 1
-                result.cards.extend(late)
+                result.add_pack(late)
                 drawn += len(late)
         failure = str(cause) if cause else ""
         if not drawn:

@@ -5,7 +5,7 @@
     python -m wikitcg_bot login SITE       connexion manuelle dans Chrome (session conservée)
 
 Codes de sortie : 0 tout va bien, 1 erreur, 2 session expirée ou refusée, 3 run déjà en cours,
-64 arguments invalides.
+64 arguments invalides, 130 interrompu (Ctrl+C).
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from .sites import SITES
 
 log = logging.getLogger("wikitcg_bot")
 
-EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_BUSY, EXIT_USAGE = 0, 1, 2, 3, 64
+EXIT_OK, EXIT_ERROR, EXIT_AUTH, EXIT_BUSY, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 3, 64, 130
 
 
 class Parser(argparse.ArgumentParser):
@@ -47,6 +47,8 @@ def one_line(text: object, limit: int = 160) -> str:
 
 def run_site(name: str, settings: Settings) -> SiteResult:
     site = SITES[name]
+    log.info("%s : début du passage%s.", site.label, " (simulation)" if settings.dry_run else "")
+    started = time.monotonic()
     try:
         result = site.run(settings)
     except Exception as exc:  # un site en échec ne doit pas bloquer les autres
@@ -59,8 +61,8 @@ def run_site(name: str, settings: Settings) -> SiteResult:
     # arrêt « propre » (vérification demandée, défi, limite atteinte) qui ne lève aucune exception.
     stock = "?" if result.packs_before is None else result.packs_before
     log.log(logging.INFO if result.ok else logging.WARNING,
-            "%s : %s, %d pack(s) ouvert(s) (stock avant : %s)%s",
-            site.label, "ok" if result.ok else "ÉCHEC", result.opened, stock,
+            "%s : %s, %d pack(s) ouvert(s) (stock avant : %s) en %ds%s",
+            site.label, "ok" if result.ok else "ÉCHEC", result.opened, stock, time.monotonic() - started,
             f" — {one_line(result.message)}" if result.message else "")
     return result
 
@@ -69,9 +71,10 @@ def setup_logging(settings: Settings) -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    console = logging.StreamHandler()
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    if sys.stderr is not None:  # pythonw (tâche planifiée sans fenêtre) n'a pas de console
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        root.addHandler(console)
     settings.logs_dir.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         settings.logs_dir / "bot.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
@@ -124,14 +127,18 @@ def do_run(parser: argparse.ArgumentParser, args, settings: Settings) -> int:
                      round(schedule.seconds_left(settings, name) / 60))
     if not due:
         return EXIT_OK
+    log.info("Passage : %s.", ", ".join(SITES[n].label for n in due))
     try:
         with run_lock(settings.state_dir / "run.lock"):
             results = []
             for name in due:
                 result = run_site(name, settings)
-                record(settings, result)
-                if not settings.dry_run:
-                    schedule.record(settings, result)
+                try:  # un disque plein ou un fichier verrouillé ne doit pas faire perdre les autres sites
+                    record(settings, result)
+                    if not settings.dry_run:
+                        schedule.record(settings, result)
+                except OSError as exc:
+                    log.error("Historique ou planning non écrit pour %s : %s", SITES[name].label, one_line(exc))
                 results.append(result)
             (settings.state_dir / "last_run.json").write_text(
                 json.dumps({"at": int(time.time()), "sites": due}), encoding="utf-8")
@@ -166,7 +173,7 @@ def do_status(parser: argparse.ArgumentParser, args, settings: Settings) -> int:
         EXIT_OK if all(r.ok for r in results) else EXIT_ERROR)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -191,6 +198,21 @@ def main(argv: list[str] | None = None) -> int:
         return do_status(parser, args, settings)
     settings.dry_run = settings.dry_run or args.dry_run
     return do_run(parser, args, settings)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Filet de sécurité : rien ne doit sortir en trace brute, et tout échec laisse une trace dans le journal."""
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        # Ctrl+C : les `finally` ont déjà refermé Chrome, réécrit les cookies et libéré le verrou.
+        log.warning("Interrompu (Ctrl+C) : Chrome refermé, session conservée, verrou libéré.")
+        return EXIT_INTERRUPTED
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.critical("Erreur inattendue : %s", one_line(exc), exc_info=True)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
