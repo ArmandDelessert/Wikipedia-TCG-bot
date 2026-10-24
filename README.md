@@ -130,7 +130,7 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
 - Se déconnecter d'un site dans le navigateur d'où vient l'export peut invalider la session exportée
   (non vérifié) : évitez-le, ou refaites un export ensuite.
 - Automatiser un site peut contrevenir à ses conditions d'utilisation et conduire à la restriction
-  du compte. Le bot espace les ouvertures de 2 à 4 secondes et plafonne chaque run (10 packs par
+  du compte. Le bot espace les ouvertures de 2 à 4 secondes et plafonne chaque passage (100 packs par
   site par défaut). Vous l'utilisez à vos risques.
 
 ## Développement

@@ -29,7 +29,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 @dataclass
 class Settings:
     env: Mapping[str, str] = field(default_factory=dict)
-    max_packs: int = 10
+    max_packs: int = 100  # garde-fou contre une boucle sans fin, jamais atteint avec un stock de ~10
     dry_run: bool = False
     # État d'exécution local (sessions, profils de navigateur, historique, journaux) : jamais versionné.
     state_dir: Path = Path(".state")
@@ -49,7 +49,7 @@ class Settings:
         channel = channel.strip().lower()
         return cls(
             env=env,
-            max_packs=max(1, int(env.get("MAX_PACKS_PER_RUN") or 10)),
+            max_packs=max(1, int(env.get("MAX_PACKS_PER_RUN") or 100)),
             dry_run=_truthy(env.get("DRY_RUN")),
             state_dir=Path(env.get("STATE_DIR") or ".state"),
             cookies_dir=Path(env.get("COOKIES_DIR") or "Cookies"),
