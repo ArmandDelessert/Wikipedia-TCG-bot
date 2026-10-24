@@ -117,11 +117,13 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
 ## Limites connues
 
 - Récompenses (autorisées par le propriétaire) : le bot récupère la « récompense de connexion » de wiki-tcg.com
-  et ouvre les packs de complétion de wikitcg.net ; les missions de Wikipedia Gacha « 5 packs », « SR+ » et
-  « Wikipedia » sont créditées par le site pendant l'ouverture. Ces deux réclamations n'ont été vérifiées que
+  et ouvre les packs de complétion de wikitcg.net. Sur Wikipedia Gacha, les missions « 5 packs » et « SR+ » sont
+  créditées par le site ; le bot valide aussi, une fois par jour, « Ouvrir Wikipedia une fois » (clic sur la pile
+  de cartes, onglet refermé) et « Partager le résultat » (un clic sur le bouton suffit ; les alertes du site sont
+  refusées, rien n'est publié). Les réclamations de wiki-tcg.com et de wikitcg.net n'ont été vérifiées que
   contre de faux sites (rien à réclamer le jour du test) ; la forme des packs de complétion est supposée.
-- Le bot ne réclame **pas** les missions « partager le résultat » (publication sur un réseau social) ni
-  « regarder une publicité » : il ne publie rien et ne simule aucune publicité.
+- Le bot ne regarde **aucune publicité** : la mission « Regarder une publicité » et la recharge par pub de
+  Wikipedia Gacha supposeraient de simuler un visionnage, ce qui fausserait les statistiques des annonceurs.
 - Le pack mystère de wikitcg.net est demandé « à l'aveugle » (cadence inconnue, ~6 h supposées) ; les refus
   sont sans effet. `WIKITCG_NET_MYSTERY=0` désactive la demande.
 - Les packs spéciaux de WikiMasters et de wiki-tcg.com ne sont pas vérifiés en réel.

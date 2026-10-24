@@ -532,3 +532,47 @@ def test_a_stale_profile_is_recreated_once_and_only_inside_the_profiles_dir(make
     monkeypatch.setattr(module.WikiGacha, "_run", fake_run)
     result = module.WikiGacha().run(settings)
     assert calls == [True, False] and result.opened == 3
+
+
+# -- missions quotidiennes ---------------------------------------------------------------------
+def test_parse_missions_reads_done_and_pending():
+    from wikitcg_bot.sites.wikigacha import parse_missions
+    panel = ("Missions quotidiennes\nOuvrir 5 packs\nTerminé\nObtenir au moins 1 carte SR+\nTerminé\n"
+             "Ouvrir Wikipedia une fois\n0/1\nPartager le résultat\nTerminé\nRegarder une publicité\n0/1\n")
+    assert parse_missions(panel) == {"wiki": False, "share": True}  # la publicité n'est jamais lue ni tentée
+    assert parse_missions("Partager le résultat 0/1") == {"share": False}
+    assert parse_missions("Open Wikipedia once Done") == {"wiki": True}
+    assert parse_missions("rien d'utile") == {}
+    assert parse_missions("Ouvrir Wikipedia une fois") == {}  # état illisible : on ne tente rien
+
+
+def test_share_button_label_matches_only_the_real_button():
+    from wikitcg_bot.sites.wikigacha import SHARE_BUTTON
+    assert SHARE_BUTTON.match("Partager le résultat") and SHARE_BUTTON.match("Share result")
+    assert not SHARE_BUTTON.match("Chargement...") and not SHARE_BUTTON.match("📋 Copier le résultat")
+
+
+def test_missions_are_claimed_once_on_the_first_results_screen(make_settings, monkeypatch):
+    from wikitcg_bot.sites import wikigacha as module
+    calls = []
+    monkeypatch.setattr(module, "_claim_missions", lambda page, todo: calls.append(set(todo)))
+    seen_hooks = []
+
+    def fake_open_one(page, seen, on_results=None):
+        seen_hooks.append(on_results)
+        if on_results:
+            on_results(page)
+        return [module.Card("Paris", "C")]
+
+    monkeypatch.setattr(module, "_open_one", fake_open_one)
+    monkeypatch.setattr(module, "_body_text", lambda page: "Ouvrir Wikipedia une fois\n0/1\nPartager le résultat\n0/1")
+    monkeypatch.setattr(module, "_wait_for_game", lambda page, timeout_s=10: "PAQUETS QUOTIDIENS: 1 / 10")
+    monkeypatch.setattr(module, "_gacha_responses", lambda page: [])
+    monkeypatch.setattr(module, "_wait_for_sync", lambda *a: ("ok", module.Collection(1, 1), 0))
+    monkeypatch.setattr(module, "_cloud_collection", lambda page: module.Collection(1, 1))
+    settings = make_settings()
+    settings.max_packs = 3
+    result = module.SiteResult("wikigacha", "Wikipedia Gacha", packs_before=3)
+    module.WikiGacha()._open_packs(object(), settings, result, module.Collection(1, 1))
+    assert calls == [{"wiki", "share"}]  # une seule tentative
+    assert seen_hooks[0] is not None and all(h is None for h in seen_hooks[1:])

@@ -71,6 +71,18 @@ STOCK = re.compile(r"(?:PAQUETS QUOTIDIENS|DAILY PACKS)\s*:?\s*(\d+)\s*/\s*(\d+)
 COUNTDOWN = re.compile(r"(?:Prochain pack dans|Next pack in)\s*:?\s*(\d+):(\d{2})", re.I)
 NO_PACKS = re.compile(r"plus de packs|no packs left", re.I)
 BACK = re.compile(r"retour aux packs|back to packs", re.I)
+
+# Missions quotidiennes autorisées par le propriétaire (+2 packs chacune). La mission « publicité » n'est
+# jamais tentée : ce serait simuler un visionnage.
+MISSION_LABELS = {
+    "wiki": re.compile(r"Ouvrir Wikipedia une fois|Open Wikipedia once", re.I),
+    "share": re.compile(r"Partager le résultat|Share (?:the )?result", re.I),
+}
+SHARE_BUTTON = re.compile(r"^\W*(partager le résultat|share (the )?result)\W*$", re.I)
+# La pile de cartes de l'écran de résultat : un clic ouvre l'article Wikipédia de la carte du dessus (nouvel
+# onglet) et valide « Ouvrir Wikipedia une fois ».
+CARD_STACK = 'div[class*="h-[392px]"][class*="w-[292px]"]'
+MISSION_WAIT_S = 20
 SKIP = re.compile(r"^(voir les résultats|skip to results)$", re.I)
 CHALLENGE_TITLE = re.compile(r"un instant|just a moment|attention required|vérification", re.I)
 # Fenêtres d'information à refermer : jamais « Partager la campagne », « Se déconnecter », une pub…
@@ -162,6 +174,22 @@ def parse_stock(text: str) -> tuple[int, int] | None:
     """(packs disponibles, plafond) d'après « PAQUETS QUOTIDIENS : 7 / 10 » ou « DAILY PACKS: 7 / 10 »."""
     match = STOCK.search(text)
     return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def parse_missions(text: str) -> dict[str, bool]:
+    """Missions faites (True) ou à faire (False) d'après le panneau « Missions quotidiennes » (« Terminé » ou
+    « 0/1 » après le libellé). Une mission dont l'état n'est pas lisible est absente du résultat."""
+    states: dict[str, bool] = {}
+    for key, label in MISSION_LABELS.items():
+        match = label.search(text)
+        if not match:
+            continue
+        after = text[match.end(): match.end() + 30]
+        if re.search(r"termin|done|complet", after, re.I):
+            states[key] = True
+        elif re.search(r"\b0\s*/\s*1\b", after):
+            states[key] = False
+    return states
 
 
 def parse_countdown(text: str) -> int | None:
@@ -507,7 +535,50 @@ def _drawn_cards(seen: list[Response]) -> list[Card]:
     return cards
 
 
-def _open_one(page: Page, seen: list[Response]) -> list[Card] | None:
+def _claim_missions(page: Page, todo: set[str]) -> None:
+    """Valide, sur l'écran de résultat, les missions « Wikipedia » et « partage » qui restent à faire.
+
+    - Wikipedia : un clic sur la pile de cartes ouvre l'article dans un nouvel onglet, refermé aussitôt.
+    - Partage : un clic sur « Partager le résultat » suffit à valider la mission ; le site tente ensuite de
+      partager (alerte, copie dans le presse-papiers, image téléchargée). Les alertes sont refusées : rien n'est
+      publié nulle part.
+    """
+    opened_tabs: list[Page] = []
+    def on_tab(tab: Page) -> None:
+        opened_tabs.append(tab)
+
+    def on_dialog(dialog) -> None:
+        try:
+            dialog.dismiss()
+        except PlaywrightError:  # déjà refusée par un autre gestionnaire
+            pass
+
+    page.context.on("page", on_tab)
+    page.on("dialog", on_dialog)
+    try:
+        if "wiki" in todo:
+            page.locator(CARD_STACK).first.click(timeout=MISSION_WAIT_S * 1000)
+            log.info("%s : article Wikipédia ouvert (mission « Ouvrir Wikipedia une fois »).", WikiGacha.label)
+            page.wait_for_timeout(1500)
+        if "share" in todo:
+            button = page.get_by_role("button", name=SHARE_BUTTON)
+            button.first.wait_for(state="visible", timeout=MISSION_WAIT_S * 1000)  # « Chargement… » d'abord
+            button.first.click(timeout=MISSION_WAIT_S * 1000)
+            log.info("%s : bouton de partage cliqué (mission « Partager le résultat »).", WikiGacha.label)
+            page.wait_for_timeout(3000)
+    except PlaywrightError as exc:
+        log.warning("%s : mission quotidienne non validée : %s", WikiGacha.label, _describe(exc))
+    finally:
+        for tab in opened_tabs:  # l'onglet de l'article, et tout ce que le partage aurait ouvert
+            try:
+                tab.close()
+            except PlaywrightError:
+                pass
+        page.context.remove_listener("page", on_tab)
+        page.remove_listener("dialog", on_dialog)
+
+
+def _open_one(page: Page, seen: list[Response], on_results=None) -> list[Card] | None:
     """Touche le pack, lit les cartes dans la réponse de /api/gacha, revient à l'écran des packs.
 
     Rend None si le pack n'a pas réagi parce que le stock est en fait vide. Une erreur après la réponse de
@@ -540,6 +611,8 @@ def _open_one(page: Page, seen: list[Response]) -> list[Card] | None:
     cards = _drawn_cards(seen)
     if not cards:
         raise SiteError("Aucune carte dans la réponse de /api/gacha : le site a-t-il changé ?")
+    if on_results is not None:
+        on_results(page)
     back.first.click(timeout=BACK_CLICK_TIMEOUT_MS)
     page.wait_for_timeout(500)
     return cards
@@ -640,10 +713,19 @@ class WikiGacha:
         cause: SiteError | None = None
         touched = False  # un pack est touché mais pas encore consigné : s'il échoue, il a pu être consommé
         read_at = time.monotonic()
+        missions = {key for key, done in parse_missions(_body_text(page)).items() if not done}
+        claims = None
+        if missions:
+            log.info("%s : missions à valider aujourd'hui : %s.", self.label, ", ".join(sorted(missions)))
+
+            def claims(current: Page) -> None:  # une seule tentative par passage, au premier écran de résultat
+                todo = set(missions)
+                missions.clear()
+                _claim_missions(current, todo)
         try:
             while stock > 0 and result.opened < settings.max_packs:
                 touched = True
-                cards = _open_one(page, seen)
+                cards = _open_one(page, seen, claims if missions else None)
                 if cards is None:
                     stock, touched = 0, False
                     break
