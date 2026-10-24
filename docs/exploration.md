@@ -74,11 +74,13 @@ exporter.
   renvoie les cartes. Le client ajoute des gardes (« pack guard ») : piloter l'interface avec
   Playwright est plus sûr que de rejouer l'API.
 - Interface : « PAQUETS QUOTIDIENS : 7 / 10 », « Prochain pack dans : m:ss », « ▲ TOUCHEZ POUR
-  OUVRIR ▲ ». Stock vide : « Plus de packs » + « Regarder une pub pour recharger » (non
-  automatisé).
+  OUVRIR ▲ ». Stock vide : « Plus de packs » + « Regarder une pub pour recharger ». Le bot clique ce
+  bouton uniquement dans un navigateur visible (`HEADLESS=0`), puis attend jusqu'à 180 s que le stock
+  soit crédité avant de reprendre les ouvertures. En mode headless, il laisse l'annonce intacte et indique
+  comment activer l'affichage.
 - Missions quotidiennes : +2 packs par mission (ouvrir 5 packs, obtenir une carte SR+, ouvrir
-  Wikipédia une fois, partager, regarder une pub). Les deux dernières ne sont pas automatisables
-  sans simuler une action qui n'a pas eu lieu.
+  Wikipédia une fois, partager, regarder une pub). Le bot valide « Ouvrir Wikipedia une fois » et
+  « Partager le résultat » ; la mission quotidienne « Regarder une publicité » reste hors périmètre.
 - Régénération mesurée : **1 pack par minute, plafond 10** (règle du client : `balance + floor((now -
   lastRefillAt) / 60 s)`, au plus 10). Les missions « ouvrir 5 packs » et « obtenir une carte SR+ »
   créditent +2 packs automatiquement pendant l'ouverture : le stock affiché peut dépasser 10 (11/10 vu).

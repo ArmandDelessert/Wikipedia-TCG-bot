@@ -382,7 +382,7 @@ def test_reuses_the_backup_of_the_day_and_stops_on_empty_stock(fake_site, make_s
     assert len(backups(settings)) == 1 and fake_site.full_reads == 2  # import du client + sauvegarde
     second = WikiGacha().run(settings)  # même profil : la base locale persiste, rien à ouvrir
     assert second.opened == 0 and second.packs_before == 0 and "Plus de pack" in second.message
-    assert "ignorée" in second.message and "ad" not in fake_site.decoys
+    assert "HEADLESS=0" in second.message and "ad" not in fake_site.decoys
     assert len(backups(settings)) == 1 and fake_site.full_reads == 3  # seul le client a relu le cloud : une sauvegarde par jour
 
 

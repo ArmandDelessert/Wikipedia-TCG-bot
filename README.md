@@ -3,9 +3,10 @@
 Ouvre automatiquement, **depuis votre poste Windows**, les boosters gratuits qui se rechargent sur
 quatre jeux de cartes à collectionner tirés de Wikipédia. Une tâche planifiée repasse toutes les
 10 minutes, se connecte avec votre session, ouvre les packs disponibles et note les cartes tirées
-dans un historique local.
+dans un historique local. Sur Wikipedia Gacha, quand le stock est vide, le bot peut aussi lancer
+l'annonce de recharge et attendre que le site crédite les nouveaux packs.
 
-Le bot **n'ouvre que des packs**. Il ne dépense rien, ne touche ni au marché, ni aux enchères, ni aux échanges et ne résout ni ne contourne aucun défi anti-bot : si un site en présente un, le bot s'arrête et le dit.
+Le bot ne dépense rien et ne touche ni au marché, ni aux enchères, ni aux échanges. L'annonce de recharge de Wikipedia Gacha est lancée seulement dans un navigateur visible afin que l'utilisateur puisse la regarder ; aucune étape de visionnage n'est simulée. Le bot ne résout ni ne contourne aucun défi anti-bot : si un site en présente un, il s'arrête et le dit.
 
 ## Pourquoi en local
 
@@ -61,7 +62,9 @@ Codes de sortie : 0 tout va bien, 1 erreur, 2 session expirée ou refusée (reco
 l'export), 3 un autre run est en cours, 64 arguments invalides.
 
 Réglages facultatifs : copiez `.env.example` en `.env` (nombre maximal de packs par run, navigateur,
-fenêtre visible avec `HEADLESS=0`, série de wikitcg.net, pack mystère…).
+fenêtre visible avec `HEADLESS=0`, série de wikitcg.net, pack mystère…). Pour que l'annonce de recharge
+de Wikipedia Gacha soit visible, définissez `HEADLESS=0` : le Chrome lancé par la tâche planifiée
+apparaîtra à l'écran pendant l'annonce. En mode headless (valeur par défaut), le bot ne lance pas l'annonce.
 
 ## Suivre ce que fait le bot
 
@@ -74,8 +77,8 @@ Get-Content .state\logs\bot.log -Wait -Tail 30
 
 Lancé à la main, `run` affiche les mêmes lignes dans le terminal. Ctrl+C l'interrompt proprement
 (Chrome refermé, cookies conservés, verrou libéré, code de sortie 130). La tâche planifiée utilise
-`pythonw.exe` et n'ouvre aucune fenêtre ; après une mise à jour de ce dépôt, relancez
-`.\scripts\install_task.ps1` pour qu'elle en profite.
+`pythonw.exe` et n'ouvre aucune console ; avec `HEADLESS=0`, la fenêtre Chrome reste visible pour l'annonce.
+Après une mise à jour de ce dépôt, relancez `.\scripts\install_task.ps1` pour qu'elle en profite.
 
 ## Où vont les données
 
@@ -118,7 +121,9 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
   et ouvre les packs de complétion de wikitcg.net. Sur Wikipedia Gacha, les missions « 5 packs » et « SR+ » sont
   créditées par le site ; le bot valide aussi, une fois par jour, « Ouvrir Wikipedia une fois » (clic sur la pile
   de cartes, onglet refermé) et « Partager le résultat » (un clic sur le bouton suffit ; les alertes du site sont
-  refusées, rien n'est publié). Les réclamations de wiki-tcg.com et de wikitcg.net n'ont été vérifiées que
+  refusées, rien n'est publié). Quand les packs Wikipedia Gacha sont épuisés, il lance le bouton de recharge
+  dans un navigateur visible et attend jusqu'à trois minutes le crédit confirmé par le site. La mission quotidienne
+  « Regarder une publicité » reste exclue. Les réclamations de wiki-tcg.com et de wikitcg.net n'ont été vérifiées que
   contre de faux sites (rien à réclamer le jour du test) ; la forme des packs de complétion est supposée.
 - Le pack mystère de wikitcg.net est demandé « à l'aveugle » (cadence inconnue, ~6 h supposées) ; les refus
   sont sans effet. `WIKITCG_NET_MYSTERY=0` désactive la demande.

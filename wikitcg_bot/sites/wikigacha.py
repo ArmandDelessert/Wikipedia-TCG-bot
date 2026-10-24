@@ -15,8 +15,9 @@ Pendant les ouvertures (au plus une relecture par minute, pas de martèlement) e
 résumé du cloud : toute baisse arrête tout. Un échec après l'ouverture d'un pack ne fait jamais disparaître
 ce qui a été tiré : le résultat partiel est rendu avec une alarme.
 
-On ne touche à rien d'autre : ni synchronisation manuelle, ni publicité, ni partage, ni missions,
-ni déconnexion. La publicité de recharge (« Regarder une pub pour recharger ») n'est jamais cliquée.
+La publicité de recharge est lancée uniquement quand le stock est vide et dans un navigateur visible :
+le site doit réellement afficher l'annonce à l'utilisateur. Le bot attend que le site crédite les packs,
+puis reprend les ouvertures normales. La mission quotidienne publicitaire, elle, reste hors périmètre.
 """
 from __future__ import annotations
 
@@ -65,12 +66,16 @@ FETCH_TIMEOUT_MS = 60_000  # l'API du site est parfois très lente
 LOCAL_TIMEOUT_MS = 15_000
 RESULTS_WAIT_S = 60  # temps laissé à l'écran des résultats pour apparaître après le toucher du pack
 BACK_CLICK_TIMEOUT_MS = 15_000
+AD_WAIT_S = 180  # délai maximal pour que l'annonce se termine et que le site crédite les packs
+AD_POLL_MS = 1000
 
 # Libellés français et anglais (la langue de l'interface suit ?lang=).
 STOCK = re.compile(r"(?:PAQUETS QUOTIDIENS|DAILY PACKS)\s*:?\s*(\d+)\s*/\s*(\d+)", re.I)
 COUNTDOWN = re.compile(r"(?:Prochain pack dans|Next pack in)\s*:?\s*(\d+):(\d{2})", re.I)
 NO_PACKS = re.compile(r"plus de packs|no packs left", re.I)
 BACK = re.compile(r"retour aux packs|back to packs", re.I)
+AD_RECHARGE_BUTTON = re.compile(
+    r"^(?:.*regarder.*pub.*recharg.*|.*watch.*ad.*(?:recharg|refill).*)$", re.I)
 
 # Missions quotidiennes autorisées par le propriétaire (+2 packs chacune). La mission « publicité » n'est
 # jamais tentée : ce serait simuler un visionnage.
@@ -389,12 +394,40 @@ def _wait_for_game(page: Page, timeout_s: float = 40.0) -> str:
     raise SiteError("L'écran des packs n'est pas apparu : l'interface a peut-être changé.")
 
 
+def _recharge_with_visible_ad(page: Page, settings: Settings) -> tuple[int | None, str]:
+    """Lance le bouton de recharge et attend que l'annonce crédite le stock, sans la simuler.
+
+    Le clic n'est permis que dans une fenêtre visible : en mode headless, personne ne pourrait voir
+    l'annonce. Le bouton de mission quotidienne « Regarder une publicité » n'est pas ciblé ici.
+    """
+    if settings.headless:
+        return None, "Recharge par annonce non lancée : configurez HEADLESS=0 pour afficher la vidéo."
+
+    button = page.get_by_role("button", name=AD_RECHARGE_BUTTON)
+    try:
+        if not button.count() or not button.first.is_visible():
+            return None, "Le bouton de recharge par annonce n'est pas visible."
+        button.first.click(timeout=MISSION_WAIT_S * 1000)
+    except PlaywrightError as exc:
+        return None, f"Impossible de lancer l'annonce : {_describe(exc)}"
+
+    log.info("Wikipedia Gacha : annonce de recharge lancée dans le navigateur visible ; attente du crédit des packs.")
+    deadline = time.monotonic() + AD_WAIT_S
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(AD_POLL_MS)
+        stock = parse_stock(_body_text(page))
+        if stock and stock[0] > 0:
+            log.info("Wikipedia Gacha : annonce terminée, le site a crédité %d pack(s).", stock[0])
+            return stock[0], ""
+    return None, f"Aucun pack crédité après {AD_WAIT_S} s ; l'annonce a-t-elle été regardée jusqu'au bout ?"
+
+
 def _dismiss_overlays(page: Page, patience_s: float | None = None) -> None:
     """Refuse le consentement publicitaire (option la plus protectrice) et referme les fenêtres d'information.
 
     Le bandeau et les fenêtres arrivent en différé et l'une cache la suivante : on attend `patience_s`
     sans nouveauté avant de conclure qu'il n'y a plus rien. Seuls des boutons précis sont actionnés :
-    jamais « Tout accepter », « Autoriser », « Partager la campagne », une publicité ni « Se déconnecter ».
+    jamais « Tout accepter », « Autoriser », « Partager la campagne », ni « Se déconnecter ».
     """
     patience_s = OVERLAY_PATIENCE_S if patience_s is None else patience_s
     quiet_until = time.monotonic() + patience_s
@@ -694,15 +727,20 @@ class WikiGacha:
             if settings.dry_run:
                 state = "identique au cloud" if blocked is None else f"à vérifier : {blocked}"
                 result.message = f"Simulation : rien n'a été ouvert. Collection {cloud}, {state}."
-            elif not result.packs_before:
-                wait = parse_countdown(text)
-                when = f" (prochain dans {wait // 60}:{wait % 60:02d})" if wait is not None else ""
-                result.message = f"Plus de pack{when} ; la recharge par publicité proposée par le site est ignorée."
             elif blocked:
                 if (allow_reset and blocked.startswith("collection locale incomplète")
                         and _local_collection(page)[1] == 0):
                     raise StaleProfile(blocked)
                 raise SiteError(f"Ouverture refusée pour protéger la collection : {blocked}.")
+            elif not result.packs_before:
+                wait = parse_countdown(text)
+                when = f" (prochain dans {wait // 60}:{wait % 60:02d})" if wait is not None else ""
+                credited, ad_message = _recharge_with_visible_ad(page, settings)
+                if credited:
+                    result.packs_before = credited
+                    self._open_packs(page, settings, result, cloud)
+                else:
+                    result.message = (f"Plus de pack{when} ; {ad_message} Collection {cloud}.")
             else:
                 self._open_packs(page, settings, result, cloud)
         return result
