@@ -5,9 +5,7 @@ quatre jeux de cartes à collectionner tirés de Wikipédia. Une tâche planifi�
 10 minutes, se connecte avec votre session, ouvre les packs disponibles et note les cartes tirées
 dans un historique local.
 
-Le bot **n'ouvre que des packs**. Il ne dépense rien, ne touche ni au marché, ni aux enchères, ni
-aux échanges, ne réclame ni mission ni récompense, ne regarde aucune publicité et ne résout ni ne
-contourne aucun défi anti-bot : si un site en présente un, le bot s'arrête et le dit.
+Le bot **n'ouvre que des packs**. Il ne dépense rien, ne touche ni au marché, ni aux enchères, ni aux échanges et ne résout ni ne contourne aucun défi anti-bot : si un site en présente un, le bot s'arrête et le dit.
 
 ## Pourquoi en local
 
@@ -122,8 +120,6 @@ Un export au format Netscape est un fichier texte de 7 colonnes séparées par d
   de cartes, onglet refermé) et « Partager le résultat » (un clic sur le bouton suffit ; les alertes du site sont
   refusées, rien n'est publié). Les réclamations de wiki-tcg.com et de wikitcg.net n'ont été vérifiées que
   contre de faux sites (rien à réclamer le jour du test) ; la forme des packs de complétion est supposée.
-- Le bot ne regarde **aucune publicité** : la mission « Regarder une publicité » et la recharge par pub de
-  Wikipedia Gacha supposeraient de simuler un visionnage, ce qui fausserait les statistiques des annonceurs.
 - Le pack mystère de wikitcg.net est demandé « à l'aveugle » (cadence inconnue, ~6 h supposées) ; les refus
   sont sans effet. `WIKITCG_NET_MYSTERY=0` désactive la demande.
 - Les packs spéciaux de WikiMasters et de wiki-tcg.com ne sont pas vérifiés en réel.
