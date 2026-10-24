@@ -395,14 +395,7 @@ def _wait_for_game(page: Page, timeout_s: float = 40.0) -> str:
 
 
 def _recharge_with_visible_ad(page: Page, settings: Settings) -> tuple[int | None, str]:
-    """Lance le bouton de recharge et attend que l'annonce crédite le stock, sans la simuler.
-
-    Le clic n'est permis que dans une fenêtre visible : en mode headless, personne ne pourrait voir
-    l'annonce. Le bouton de mission quotidienne « Regarder une publicité » n'est pas ciblé ici.
-    """
-    if settings.headless:
-        return None, "Recharge par annonce non lancée : configurez HEADLESS=0 pour afficher la vidéo."
-
+    """Lance le bouton de recharge et attend que l'annonce crédite le stock, sans la simuler."""
     button = page.get_by_role("button", name=AD_RECHARGE_BUTTON)
     try:
         if not button.count() or not button.first.is_visible():
